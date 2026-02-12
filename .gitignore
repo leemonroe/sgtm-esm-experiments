@@ -1,0 +1,24 @@
+# Include only SGTM experiment files
+*
+
+# SGTM code
+!sgtm/
+!sgtm/__init__.py
+!sgtm/data_pipeline.py
+!sgtm/masking.py
+!sgtm/train_sgtm.py
+!sgtm/evaluate_sgtm.py
+!sgtm/ablation_experiments.py
+!sgtm/test_masking.py
+
+# Raw virus data (needed for data pipeline)
+!data/
+!data/raw/
+!data/raw/virus_human.tsv
+!data/raw/virus_nonhuman.tsv
+
+# Setup script
+!setup.sh
+
+# Git files
+!.gitignore

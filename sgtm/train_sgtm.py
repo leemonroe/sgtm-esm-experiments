@@ -1,0 +1,470 @@
+"""
+SGTM training script for ESM-2 8M from scratch.
+
+Three modes:
+  baseline: all data, no gradient masking (control)
+  holdout:  all data minus forget set (strict filtering control)
+  sgtm:    all data, gradient masking localizes viral knowledge to forget params
+
+Usage:
+  python sgtm/train_sgtm.py --mode sgtm --device cuda
+  python sgtm/train_sgtm.py --mode sgtm --max-steps 5 --device cpu --batch-size 2  # smoke test
+"""
+
+import argparse
+import json
+import os
+import random
+import sys
+import time
+from collections import Counter
+from pathlib import Path
+
+import torch
+import torch.nn as nn
+from datasets import load_from_disk
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+import esm
+
+from sgtm.data_pipeline import MLMCollator
+from sgtm.masking import (
+    ablate, adjust_gradients, build_sgtm_masks, register_gradient_routing_hooks,
+)
+
+try:
+    import wandb
+    HAS_WANDB = True
+except ImportError:
+    HAS_WANDB = False
+
+
+# ---------------------------------------------------------------------------
+# Multi-dataset loader (simplified from SGTM reference, single-GPU)
+# ---------------------------------------------------------------------------
+
+class MultiDataLoader:
+    """Manages multiple DataLoaders, serving batches by dataset name with auto-reset."""
+
+    def __init__(self, datasets, batch_size, collate_fn, shuffle=True, num_workers=0):
+        self.loaders = {}
+        self.iterators = {}
+        self.epochs = {}
+        for name, ds in datasets.items():
+            self.loaders[name] = DataLoader(
+                ds, batch_size=batch_size, shuffle=shuffle,
+                collate_fn=collate_fn, num_workers=num_workers,
+                drop_last=True,
+            )
+            self.iterators[name] = iter(self.loaders[name])
+            self.epochs[name] = 0
+
+    def get_batch(self, name):
+        try:
+            return next(self.iterators[name])
+        except StopIteration:
+            self.epochs[name] += 1
+            self.iterators[name] = iter(self.loaders[name])
+            return next(self.iterators[name])
+
+
+# ---------------------------------------------------------------------------
+# Training & evaluation
+# ---------------------------------------------------------------------------
+
+def compute_mlm_loss(model, batch, device):
+    input_ids = batch["input_ids"].to(device)
+    labels = batch["labels"].to(device)
+
+    output = model(input_ids, repr_layers=[], return_contacts=False)
+    logits = output["logits"]
+
+    loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
+    return loss_fn(logits.view(-1, logits.size(-1)), labels.view(-1))
+
+
+def evaluate(model, loader, device, max_batches=None):
+    model.eval()
+    total_loss = 0.0
+    n = 0
+    with torch.no_grad():
+        for i, batch in enumerate(loader):
+            if max_batches and i >= max_batches:
+                break
+            loss = compute_mlm_loss(model, batch, device)
+            total_loss += loss.item()
+            n += 1
+    model.train()
+    return total_loss / max(n, 1)
+
+
+# ---------------------------------------------------------------------------
+# Build data_split_order
+# ---------------------------------------------------------------------------
+
+def build_data_split_order(
+    n_forget, n_adjacent, n_ambiguous, n_retain,
+    upsample_forget=50, upsample_adjacent=150,
+    total_steps=None, seed=42,
+):
+    """
+    Build a shuffled list of data source labels, one per training step.
+
+    Upsampling factors ensure viral proteins appear frequently despite being
+    a tiny fraction of the corpus.
+    """
+    order = (
+        ["forget"] * int(n_forget * upsample_forget)
+        + ["adjacent"] * int(n_adjacent * upsample_adjacent)
+        + ["default"] * n_ambiguous   # ambiguous -> "default" (all params update)
+        + ["retain"] * n_retain
+    )
+    rng = random.Random(seed)
+    rng.shuffle(order)
+
+    if total_steps and len(order) > total_steps:
+        order = order[:total_steps]
+
+    return order
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(description="SGTM training for ESM-2 8M")
+    parser.add_argument("--mode", choices=["baseline", "holdout", "sgtm"], required=True)
+    parser.add_argument("--data-dir", default="data/sgtm")
+    parser.add_argument("--output-dir", default="models/sgtm")
+    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+
+    # Hyperparameters
+    parser.add_argument("--lr", type=float, default=5e-4)
+    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--grad-accum", type=int, default=4)
+    parser.add_argument("--max-steps", type=int, default=40000)
+    parser.add_argument("--warmup-steps", type=int, default=2000)
+    parser.add_argument("--max-length", type=int, default=1022)
+    parser.add_argument("--mask-ratio", type=float, default=0.15)
+    parser.add_argument("--weight-decay", type=float, default=0.01)
+    parser.add_argument("--max-grad-norm", type=float, default=1.0)
+    parser.add_argument("--seed", type=int, default=42)
+
+    # Upsampling
+    parser.add_argument("--upsample-forget", type=float, default=50)
+    parser.add_argument("--upsample-adjacent", type=float, default=150)
+
+    # SGTM configuration
+    parser.add_argument("--forget-heads", type=str, default="17,18,19",
+                        help="Comma-separated forget head indices (default: 17,18,19)")
+    parser.add_argument("--forget-mlp-start", type=int, default=1120,
+                        help="Start index of forget MLP dims (default: 1120)")
+    parser.add_argument("--masking-strategy", choices=["gradient_zeroing", "gradient_routing"],
+                        default="gradient_zeroing",
+                        help="gradient_zeroing: zero grads post-backward; "
+                             "gradient_routing: detach activations in forward pass")
+
+    # Logging
+    parser.add_argument("--log-interval", type=int, default=100)
+    parser.add_argument("--eval-interval", type=int, default=2000)
+    parser.add_argument("--save-interval", type=int, default=10000)
+
+    # Wandb
+    parser.add_argument("--wandb-project", type=str, default="sgtm-esm2-8m")
+    parser.add_argument("--no-wandb", action="store_true", help="Disable wandb logging")
+    parser.add_argument("--run-name", type=str, default=None,
+                        help="Wandb run name (auto-generated if not set)")
+
+    args = parser.parse_args()
+
+    # Parse forget heads
+    args.forget_head_indices = [int(h) for h in args.forget_heads.split(",")]
+
+    torch.manual_seed(args.seed)
+    random.seed(args.seed)
+
+    # Build a descriptive run name
+    if args.mode == "sgtm":
+        n_heads = len(args.forget_head_indices)
+        strategy_short = "routing" if args.masking_strategy == "gradient_routing" else "zeroing"
+        default_run_name = f"sgtm-{n_heads}head-{strategy_short}"
+    else:
+        default_run_name = args.mode
+
+    run_name = args.run_name or default_run_name
+    run_dir = os.path.join(args.output_dir, run_name)
+    os.makedirs(run_dir, exist_ok=True)
+
+    # Wandb
+    use_wandb = HAS_WANDB and not args.no_wandb
+    if use_wandb:
+        wandb.init(
+            project=args.wandb_project,
+            name=f"train-{run_name}",
+            group="rerun-v2",
+            config={
+                **vars(args),
+                "run_name": run_name,
+                "effective_batch_size": args.batch_size * args.grad_accum,
+            },
+        )
+    elif not args.no_wandb:
+        print("Warning: wandb not installed, logging disabled")
+
+    # ------------------------------------------------------------------
+    # Model (from scratch)
+    # ------------------------------------------------------------------
+    print(f"Initializing ESM-2 8M from scratch (mode={args.mode})...")
+    model_data, alphabet = esm.pretrained.esm2_t6_8M_UR50D()
+    # Re-initialize all weights randomly (training from scratch)
+    model = esm.model.esm2.ESM2(
+        num_layers=6,
+        embed_dim=320,
+        attention_heads=20,
+        alphabet=alphabet,
+    )
+    model = model.to(args.device)
+    print(f"Device: {args.device}")
+    print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
+
+    # ------------------------------------------------------------------
+    # Masks and routing hooks (only for sgtm mode)
+    # ------------------------------------------------------------------
+    retain_mask, forget_mask = None, None
+    routing_hooks, sgtm_mode_ref = None, None
+    if args.mode == "sgtm":
+        retain_mask, forget_mask = build_sgtm_masks(
+            model, forget_head_indices=args.forget_head_indices,
+            forget_mlp_start=args.forget_mlp_start,
+        )
+        print(f"SGTM masks built: {len(forget_mask)} parameter tensors")
+        print(f"  Forget heads: {args.forget_head_indices}")
+        print(f"  Forget MLP start: {args.forget_mlp_start}")
+        print(f"  Strategy: {args.masking_strategy}")
+
+        if args.masking_strategy == "gradient_routing":
+            routing_hooks, sgtm_mode_ref = register_gradient_routing_hooks(
+                model, forget_head_indices=args.forget_head_indices,
+                forget_mlp_start=args.forget_mlp_start,
+            )
+            print(f"  Registered {len(routing_hooks)} gradient routing hooks")
+
+    # ------------------------------------------------------------------
+    # Data
+    # ------------------------------------------------------------------
+    print("\nLoading datasets...")
+    collator = MLMCollator(alphabet, mask_ratio=args.mask_ratio, max_length=args.max_length)
+
+    forget_train = load_from_disk(os.path.join(args.data_dir, "forget", "train"))
+    adjacent_train = load_from_disk(os.path.join(args.data_dir, "adjacent", "train"))
+    ambiguous = load_from_disk(os.path.join(args.data_dir, "ambiguous"))
+    retain_train = load_from_disk(os.path.join(args.data_dir, "retain", "train"))
+
+    forget_val = load_from_disk(os.path.join(args.data_dir, "forget", "val"))
+    adjacent_val = load_from_disk(os.path.join(args.data_dir, "adjacent", "val"))
+    retain_val = load_from_disk(os.path.join(args.data_dir, "retain", "val"))
+
+    print(f"  forget:    {len(forget_train)} train / {len(forget_val)} val")
+    print(f"  adjacent:  {len(adjacent_train)} train / {len(adjacent_val)} val")
+    print(f"  ambiguous: {len(ambiguous)} (default)")
+    print(f"  retain:    {len(retain_train)} train / {len(retain_val)} val")
+
+    # Build training data loaders
+    if args.mode == "holdout":
+        # No forget data at all
+        train_datasets = {
+            "adjacent": adjacent_train,
+            "default": ambiguous,
+            "retain": retain_train,
+        }
+    else:
+        train_datasets = {
+            "forget": forget_train,
+            "adjacent": adjacent_train,
+            "default": ambiguous,
+            "retain": retain_train,
+        }
+
+    train_loader = MultiDataLoader(
+        train_datasets, batch_size=args.batch_size,
+        collate_fn=collator, shuffle=True,
+    )
+
+    # Validation loaders (standard, no multi-dataset)
+    val_loaders = {
+        "forget": DataLoader(forget_val, batch_size=args.batch_size,
+                             collate_fn=collator, shuffle=False),
+        "adjacent": DataLoader(adjacent_val, batch_size=args.batch_size,
+                               collate_fn=collator, shuffle=False),
+        "retain": DataLoader(retain_val, batch_size=args.batch_size,
+                             collate_fn=collator, shuffle=False),
+    }
+
+    # ------------------------------------------------------------------
+    # data_split_order
+    # ------------------------------------------------------------------
+    if args.mode == "holdout":
+        data_split_order = build_data_split_order(
+            n_forget=0,
+            n_adjacent=len(adjacent_train),
+            n_ambiguous=len(ambiguous),
+            n_retain=len(retain_train),
+            upsample_forget=0,
+            upsample_adjacent=args.upsample_adjacent,
+            total_steps=args.max_steps,
+            seed=args.seed,
+        )
+    else:
+        data_split_order = build_data_split_order(
+            n_forget=len(forget_train),
+            n_adjacent=len(adjacent_train),
+            n_ambiguous=len(ambiguous),
+            n_retain=len(retain_train),
+            upsample_forget=args.upsample_forget,
+            upsample_adjacent=args.upsample_adjacent,
+            total_steps=args.max_steps,
+            seed=args.seed,
+        )
+
+    actual_steps = len(data_split_order)
+    counts = Counter(data_split_order)
+    print(f"\nTraining for {actual_steps} steps:")
+    for label in ("forget", "adjacent", "default", "retain"):
+        if counts[label]:
+            print(f"  {label}: {counts[label]} ({counts[label]/actual_steps*100:.1f}%)")
+
+    # ------------------------------------------------------------------
+    # Optimizer & scheduler
+    # ------------------------------------------------------------------
+    optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+
+    warmup = LinearLR(optimizer, start_factor=0.01, end_factor=1.0,
+                      total_iters=args.warmup_steps)
+    cosine = CosineAnnealingLR(optimizer, T_max=max(1, actual_steps - args.warmup_steps),
+                                eta_min=0)
+    scheduler = SequentialLR(optimizer, [warmup, cosine], milestones=[args.warmup_steps])
+
+    # ------------------------------------------------------------------
+    # Training loop
+    # ------------------------------------------------------------------
+    print(f"\n{'='*60}")
+    print(f"TRAINING: {args.mode}")
+    print(f"LR={args.lr}, batch={args.batch_size}×{args.grad_accum}={args.batch_size*args.grad_accum}")
+    print(f"{'='*60}\n")
+
+    model.train()
+    history = {"train_loss": [], "val_losses": [], "config": vars(args)}
+    best_val_loss = float("inf")
+    running_loss = 0.0
+    start_time = time.time()
+
+    for step in tqdm(range(actual_steps), desc=f"Training ({args.mode})"):
+        source = data_split_order[step]
+
+        # Map source to SGTM mode
+        if args.mode == "sgtm":
+            if source == "forget":
+                sgtm_mode = "forget"
+            elif source == "retain":
+                sgtm_mode = "retain"
+            else:  # "adjacent" or "default"
+                sgtm_mode = "default"
+        else:
+            sgtm_mode = None
+
+        # Set routing mode before forward pass (gradient routing only)
+        if sgtm_mode_ref is not None:
+            sgtm_mode_ref[0] = sgtm_mode or "default"
+
+        # Gradient accumulation
+        optimizer.zero_grad()
+        accum_loss = 0.0
+
+        for _ in range(args.grad_accum):
+            batch = train_loader.get_batch(source)
+            loss = compute_mlm_loss(model, batch, args.device)
+            loss = loss / args.grad_accum
+            loss.backward()
+
+            # Apply gradient zeroing after each micro-batch backward
+            if sgtm_mode and retain_mask is not None and args.masking_strategy == "gradient_zeroing":
+                adjust_gradients(model, retain_mask, forget_mask, sgtm_mode)
+
+            accum_loss += loss.item()
+
+        torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+        optimizer.step()
+        scheduler.step()
+        running_loss += accum_loss
+
+        # Logging
+        if (step + 1) % args.log_interval == 0:
+            avg_loss = running_loss / args.log_interval
+            lr = optimizer.param_groups[0]["lr"]
+            elapsed = time.time() - start_time
+            steps_per_sec = (step + 1) / elapsed
+            tqdm.write(
+                f"step {step+1}/{actual_steps} | loss={avg_loss:.4f} | "
+                f"lr={lr:.2e} | {steps_per_sec:.1f} steps/s | source={source}"
+            )
+            history["train_loss"].append({"step": step + 1, "loss": avg_loss})
+            if use_wandb:
+                wandb.log({"train/loss": avg_loss, "train/lr": lr}, step=step + 1)
+            running_loss = 0.0
+
+        # Evaluation
+        if (step + 1) % args.eval_interval == 0 or step == actual_steps - 1:
+            val_results = {}
+            for name, loader in val_loaders.items():
+                val_results[name] = evaluate(model, loader, args.device)
+            tqdm.write(
+                f"  [eval] forget={val_results['forget']:.4f} "
+                f"adjacent={val_results['adjacent']:.4f} "
+                f"retain={val_results['retain']:.4f}"
+            )
+            history["val_losses"].append({"step": step + 1, **val_results})
+            if use_wandb:
+                wandb.log({
+                    "val/forget_loss": val_results["forget"],
+                    "val/adjacent_loss": val_results["adjacent"],
+                    "val/retain_loss": val_results["retain"],
+                }, step=step + 1)
+
+            # Save best by retain val loss
+            if val_results["retain"] < best_val_loss:
+                best_val_loss = val_results["retain"]
+                torch.save(model.state_dict(), os.path.join(run_dir, "best_model.pt"))
+
+        # Periodic save
+        if (step + 1) % args.save_interval == 0:
+            torch.save(model.state_dict(), os.path.join(run_dir, f"checkpoint_{step+1}.pt"))
+
+    # ------------------------------------------------------------------
+    # Save final model + history
+    # ------------------------------------------------------------------
+    torch.save(model.state_dict(), os.path.join(run_dir, "final_model.pt"))
+
+    # Also save the masks for SGTM mode
+    if forget_mask is not None:
+        torch.save({"retain_mask": retain_mask, "forget_mask": forget_mask},
+                    os.path.join(run_dir, "masks.pt"))
+
+    history["total_time_s"] = time.time() - start_time
+    with open(os.path.join(run_dir, "training_history.json"), "w") as f:
+        json.dump(history, f, indent=2)
+
+    if use_wandb:
+        wandb.finish()
+
+    print(f"\nTraining complete. Saved to {run_dir}")
+    print(f"Total time: {history['total_time_s']/3600:.1f} hours")
+
+
+if __name__ == "__main__":
+    main()
