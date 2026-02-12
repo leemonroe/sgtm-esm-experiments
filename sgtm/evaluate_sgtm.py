@@ -146,10 +146,11 @@ def plot_training_curves(models_dir, output_path):
     """Plot training loss curves for all modes."""
     fig, ax = plt.subplots(figsize=(10, 6))
 
-    for mode in ("baseline", "holdout", "sgtm"):
-        history_path = os.path.join(models_dir, mode, "training_history.json")
+    for entry in sorted(os.listdir(models_dir)):
+        history_path = os.path.join(models_dir, entry, "training_history.json")
         if not os.path.exists(history_path):
             continue
+        mode = entry
         with open(history_path) as f:
             history = json.load(f)
 
@@ -216,6 +217,9 @@ def main():
     all_results = {}
 
     for run_name in run_names:
+        # Seed for reproducible masking across models
+        torch.manual_seed(42)
+
         ckpt_path = os.path.join(args.models_dir, run_name, "final_model.pt")
         if not os.path.exists(ckpt_path):
             print(f"\nSkipping {run_name}: {ckpt_path} not found")
@@ -243,7 +247,8 @@ def main():
                 forget_mask = saved["forget_mask"]
                 print(f"  Loaded masks from {masks_path}")
             else:
-                print(f"  No saved masks, recomputing with defaults")
+                print(f"  WARNING: No masks.pt found! Using DEFAULT 3-head masks.")
+                print(f"  This is WRONG for 1-head variants. Check {masks_path}")
                 retain_mask, forget_mask = build_sgtm_masks(model)
 
             ablate(model, forget_mask)

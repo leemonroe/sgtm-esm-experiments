@@ -8,10 +8,18 @@ echo "========================="
 
 if [ -z "$TRAIN_ARGS" ]; then
     echo "ERROR: TRAIN_ARGS environment variable not set."
-    echo "Set this in RunPod pod configuration."
-    echo "Example: --mode baseline --batch-size 16 --grad-accum 8"
+    echo "Example: TRAIN_ARGS='--mode baseline --batch-size 16 --grad-accum 8'"
     exit 1
 fi
+
+# Verify required files exist
+for f in sgtm/__init__.py sgtm/train_sgtm.py data/raw/virus_human.tsv data/raw/virus_nonhuman.tsv; do
+    if [ ! -f "$f" ]; then
+        echo "ERROR: Required file not found: $f"
+        echo "Make sure you're running from the repo root after git clone."
+        exit 1
+    fi
+done
 
 # Install Python dependencies
 echo "[1/4] Installing dependencies..."

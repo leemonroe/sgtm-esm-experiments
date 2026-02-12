@@ -96,6 +96,8 @@ def main():
     parser.add_argument("--output-dir", default="results/sgtm")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--run-name", default=None,
+                        help="SGTM run directory name (auto-detects first sgtm-* dir if not set)")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -110,9 +112,32 @@ def main():
         test_loaders[split] = DataLoader(ds, batch_size=args.batch_size,
                                          collate_fn=collator, shuffle=False)
 
-    # Load trained SGTM model
-    ckpt = os.path.join(args.models_dir, "sgtm", "final_model.pt")
+    # Find SGTM run directory
+    if args.run_name:
+        run_name = args.run_name
+    else:
+        # Auto-detect first sgtm-* directory
+        for entry in sorted(os.listdir(args.models_dir)):
+            if entry.startswith("sgtm") and os.path.exists(
+                os.path.join(args.models_dir, entry, "final_model.pt")
+            ):
+                run_name = entry
+                break
+        else:
+            print("ERROR: No SGTM model found. Use --run-name to specify.")
+            sys.exit(1)
+
+    ckpt = os.path.join(args.models_dir, run_name, "final_model.pt")
     print(f"Loading SGTM model from {ckpt}")
+
+    # Load saved masks (matches what was used during training)
+    masks_path = os.path.join(args.models_dir, run_name, "masks.pt")
+    if os.path.exists(masks_path):
+        saved_masks = torch.load(masks_path, map_location=args.device, weights_only=True)
+        print(f"Loaded masks from {masks_path}")
+    else:
+        saved_masks = None
+        print("WARNING: No saved masks found, will recompute with defaults")
 
     def load_fresh():
         model = esm.model.esm2.ESM2(
@@ -122,43 +147,52 @@ def main():
         model.eval()
         return model
 
+    def get_masks(model):
+        if saved_masks:
+            return saved_masks["retain_mask"], saved_masks["forget_mask"]
+        return build_sgtm_masks(model)
+
     results = {}
 
     # 0. Pre-ablation baseline
-    print("\n[0] SGTM pre-ablation")
+    print(f"\n[0] {run_name} pre-ablation")
+    torch.manual_seed(42)
     model = load_fresh()
     results["sgtm"] = evaluate_all(model, test_loaders, args.device)
     print(f"    forget={results['sgtm']['forget']:.2f}  adjacent={results['sgtm']['adjacent']:.2f}  retain={results['sgtm']['retain']:.2f}")
 
-    # 1. Full zero ablation (reproduce original result)
+    # 1. Full zero ablation
     print("\n[1] Full zero ablation")
+    torch.manual_seed(42)
     model = load_fresh()
-    retain_mask, forget_mask = build_sgtm_masks(model)
-    from sgtm.masking import ablate
+    retain_mask, forget_mask = get_masks(model)
     ablate(model, forget_mask)
     results["zero_all"] = evaluate_all(model, test_loaders, args.device)
     print(f"    forget={results['zero_all']['forget']:.2f}  adjacent={results['zero_all']['adjacent']:.2f}  retain={results['zero_all']['retain']:.2f}")
 
     # 2. Noise reinitialization
     print("\n[2] Noise reinitialization")
+    torch.manual_seed(42)
     model = load_fresh()
-    retain_mask, forget_mask = build_sgtm_masks(model)
+    retain_mask, forget_mask = get_masks(model)
     ablate_noise_reinit(model, forget_mask, retain_mask)
     results["noise_reinit"] = evaluate_all(model, test_loaders, args.device)
     print(f"    forget={results['noise_reinit']['forget']:.2f}  adjacent={results['noise_reinit']['adjacent']:.2f}  retain={results['noise_reinit']['retain']:.2f}")
 
     # 3. Attention-only ablation
     print("\n[3] Attention-only zero ablation")
+    torch.manual_seed(42)
     model = load_fresh()
-    _, forget_mask = build_sgtm_masks(model)
+    _, forget_mask = get_masks(model)
     ablate_attention_only(model, forget_mask)
     results["zero_attn_only"] = evaluate_all(model, test_loaders, args.device)
     print(f"    forget={results['zero_attn_only']['forget']:.2f}  adjacent={results['zero_attn_only']['adjacent']:.2f}  retain={results['zero_attn_only']['retain']:.2f}")
 
     # 4. MLP-only ablation
     print("\n[4] MLP-only zero ablation")
+    torch.manual_seed(42)
     model = load_fresh()
-    _, forget_mask = build_sgtm_masks(model)
+    _, forget_mask = get_masks(model)
     ablate_mlp_only(model, forget_mask)
     results["zero_mlp_only"] = evaluate_all(model, test_loaders, args.device)
     print(f"    forget={results['zero_mlp_only']['forget']:.2f}  adjacent={results['zero_mlp_only']['adjacent']:.2f}  retain={results['zero_mlp_only']['retain']:.2f}")
