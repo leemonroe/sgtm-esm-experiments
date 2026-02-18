@@ -1,5 +1,5 @@
 """
-SGTM training script for ESM-2 8M from scratch.
+SGTM training script for ESM-2 from scratch.
 
 Three modes:
   baseline: all data, no gradient masking (control)
@@ -7,8 +7,9 @@ Three modes:
   sgtm:    all data, gradient masking localizes viral knowledge to forget params
 
 Usage:
-  python sgtm/train_sgtm.py --mode sgtm --device cuda
-  python sgtm/train_sgtm.py --mode sgtm --max-steps 5 --device cpu --batch-size 2  # smoke test
+  python -m sgtm.train_sgtm --mode sgtm --model-size 8M --device cuda
+  python -m sgtm.train_sgtm --mode sgtm --model-size 35M --device cuda
+  python -m sgtm.train_sgtm --mode sgtm --model-size 8M --max-steps 5 --device cpu --batch-size 2  # smoke test
 """
 
 import argparse
@@ -30,12 +31,13 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import esm
+import numpy as np
 
 from sgtm.data_pipeline import MLMCollator
 from sgtm.masking import (
     ablate, adjust_gradients, build_sgtm_masks, register_gradient_routing_hooks,
 )
+from sgtm.model_config import get_config, load_alphabet, create_model
 
 try:
     import wandb
@@ -51,7 +53,8 @@ except ImportError:
 class MultiDataLoader:
     """Manages multiple DataLoaders, serving batches by dataset name with auto-reset."""
 
-    def __init__(self, datasets, batch_size, collate_fn, shuffle=True, num_workers=0):
+    def __init__(self, datasets, batch_size, collate_fn, shuffle=True,
+                 num_workers=0, pin_memory=False):
         self.loaders = {}
         self.iterators = {}
         self.epochs = {}
@@ -59,7 +62,7 @@ class MultiDataLoader:
             self.loaders[name] = DataLoader(
                 ds, batch_size=batch_size, shuffle=shuffle,
                 collate_fn=collate_fn, num_workers=num_workers,
-                drop_last=True,
+                pin_memory=pin_memory, drop_last=True,
             )
             self.iterators[name] = iter(self.loaders[name])
             self.epochs[name] = 0
@@ -138,11 +141,15 @@ def build_data_split_order(
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="SGTM training for ESM-2 8M")
+    parser = argparse.ArgumentParser(description="SGTM training for ESM-2")
     parser.add_argument("--mode", choices=["baseline", "holdout", "sgtm"], required=True)
+    parser.add_argument("--model-size", type=str, default="8M",
+                        help="Model size: 8M or 35M (default: 8M)")
     parser.add_argument("--data-dir", default="data/sgtm")
     parser.add_argument("--output-dir", default="models/sgtm")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--num-workers", type=int, default=4,
+                        help="DataLoader num_workers (default: 4)")
 
     # Hyperparameters
     parser.add_argument("--lr", type=float, default=5e-4)
@@ -161,10 +168,10 @@ def main():
     parser.add_argument("--upsample-adjacent", type=float, default=150)
 
     # SGTM configuration
-    parser.add_argument("--forget-heads", type=str, default="17,18,19",
-                        help="Comma-separated forget head indices (default: 17,18,19)")
-    parser.add_argument("--forget-mlp-start", type=int, default=1120,
-                        help="Start index of forget MLP dims (default: 1120)")
+    parser.add_argument("--forget-heads", type=str, default=None,
+                        help="Comma-separated forget head indices (default: from model config)")
+    parser.add_argument("--forget-mlp-start", type=int, default=None,
+                        help="Start index of forget MLP dims (default: from model config)")
     parser.add_argument("--masking-strategy", choices=["gradient_zeroing", "gradient_routing"],
                         default="gradient_zeroing",
                         help="gradient_zeroing: zero grads post-backward; "
@@ -176,18 +183,28 @@ def main():
     parser.add_argument("--save-interval", type=int, default=10000)
 
     # Wandb
-    parser.add_argument("--wandb-project", type=str, default="sgtm-esm2-8m")
+    parser.add_argument("--wandb-project", type=str, default=None,
+                        help="Wandb project name (default: sgtm-esm2-{model_size})")
     parser.add_argument("--no-wandb", action="store_true", help="Disable wandb logging")
     parser.add_argument("--run-name", type=str, default=None,
                         help="Wandb run name (auto-generated if not set)")
 
     args = parser.parse_args()
 
-    # Parse forget heads
-    args.forget_head_indices = [int(h) for h in args.forget_heads.split(",")]
+    # Load model config and resolve defaults
+    cfg = get_config(args.model_size)
+    if args.forget_heads is None:
+        args.forget_head_indices = list(cfg.default_forget_heads)
+    else:
+        args.forget_head_indices = [int(h) for h in args.forget_heads.split(",")]
+    if args.forget_mlp_start is None:
+        args.forget_mlp_start = cfg.default_forget_mlp_start
+    if args.wandb_project is None:
+        args.wandb_project = f"sgtm-esm2-{cfg.name.lower()}"
 
     torch.manual_seed(args.seed)
     random.seed(args.seed)
+    np.random.seed(args.seed)
 
     # Build a descriptive run name
     if args.mode == "sgtm":
@@ -211,6 +228,9 @@ def main():
             config={
                 **vars(args),
                 "run_name": run_name,
+                "model_size": cfg.name,
+                "head_dim": cfg.head_dim,
+                "mlp_dim": cfg.mlp_dim,
                 "effective_batch_size": args.batch_size * args.grad_accum,
             },
         )
@@ -220,15 +240,8 @@ def main():
     # ------------------------------------------------------------------
     # Model (from scratch)
     # ------------------------------------------------------------------
-    print(f"Initializing ESM-2 8M from scratch (mode={args.mode})...")
-    model_data, alphabet = esm.pretrained.esm2_t6_8M_UR50D()
-    # Re-initialize all weights randomly (training from scratch)
-    model = esm.model.esm2.ESM2(
-        num_layers=6,
-        embed_dim=320,
-        attention_heads=20,
-        alphabet=alphabet,
-    )
+    print(f"Initializing ESM-2 {cfg.name} from scratch (mode={args.mode})...")
+    model, alphabet = create_model(cfg)
     model = model.to(args.device)
     print(f"Device: {args.device}")
     print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
@@ -242,16 +255,18 @@ def main():
         retain_mask, forget_mask = build_sgtm_masks(
             model, forget_head_indices=args.forget_head_indices,
             forget_mlp_start=args.forget_mlp_start,
+            head_dim=cfg.head_dim,
         )
         print(f"SGTM masks built: {len(forget_mask)} parameter tensors")
-        print(f"  Forget heads: {args.forget_head_indices}")
-        print(f"  Forget MLP start: {args.forget_mlp_start}")
+        print(f"  Forget heads: {args.forget_head_indices} (head_dim={cfg.head_dim})")
+        print(f"  Forget MLP start: {args.forget_mlp_start} / {cfg.mlp_dim}")
         print(f"  Strategy: {args.masking_strategy}")
 
         if args.masking_strategy == "gradient_routing":
             routing_hooks, sgtm_mode_ref = register_gradient_routing_hooks(
                 model, forget_head_indices=args.forget_head_indices,
                 forget_mlp_start=args.forget_mlp_start,
+                head_dim=cfg.head_dim,
             )
             print(f"  Registered {len(routing_hooks)} gradient routing hooks")
 
@@ -291,19 +306,24 @@ def main():
             "retain": retain_train,
         }
 
+    pin = args.device != "cpu"
     train_loader = MultiDataLoader(
         train_datasets, batch_size=args.batch_size,
         collate_fn=collator, shuffle=True,
+        num_workers=args.num_workers, pin_memory=pin,
     )
 
     # Validation loaders (standard, no multi-dataset)
     val_loaders = {
         "forget": DataLoader(forget_val, batch_size=args.batch_size,
-                             collate_fn=collator, shuffle=False),
+                             collate_fn=collator, shuffle=False,
+                             num_workers=args.num_workers, pin_memory=pin),
         "adjacent": DataLoader(adjacent_val, batch_size=args.batch_size,
-                               collate_fn=collator, shuffle=False),
+                               collate_fn=collator, shuffle=False,
+                               num_workers=args.num_workers, pin_memory=pin),
         "retain": DataLoader(retain_val, batch_size=args.batch_size,
-                             collate_fn=collator, shuffle=False),
+                             collate_fn=collator, shuffle=False,
+                             num_workers=args.num_workers, pin_memory=pin),
     }
 
     # ------------------------------------------------------------------
@@ -460,6 +480,16 @@ def main():
         json.dump(history, f, indent=2)
 
     if use_wandb:
+        # Upload model artifacts
+        artifact = wandb.Artifact(
+            f"sgtm-{cfg.name.lower()}-{run_name}", type="model",
+            metadata={"model_size": cfg.name, "mode": args.mode},
+        )
+        for fname in ("final_model.pt", "masks.pt", "training_history.json"):
+            fpath = os.path.join(run_dir, fname)
+            if os.path.exists(fpath):
+                artifact.add_file(fpath)
+        wandb.log_artifact(artifact)
         wandb.finish()
 
     print(f"\nTraining complete. Saved to {run_dir}")

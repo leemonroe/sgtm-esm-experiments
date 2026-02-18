@@ -6,17 +6,19 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pytest
 import torch
-import esm
 
 from sgtm.masking import build_sgtm_masks, adjust_gradients, ablate, register_gradient_routing_hooks
+from sgtm.model_config import get_config, load_alphabet, create_model
 
+# Tests use 8M config for speed (35M tests can be added later)
+_CFG = get_config("8M")
 
-NUM_LAYERS = 6
-FORGET_HEADS = [17, 18, 19]
-HEAD_DIM = 16
-FORGET_ROWS_START = 272
-FORGET_ROWS_END = 320
-FORGET_MLP_START = 1120
+NUM_LAYERS = _CFG.num_layers
+FORGET_HEADS = list(_CFG.default_forget_heads)
+HEAD_DIM = _CFG.head_dim
+FORGET_ROWS_START = min(FORGET_HEADS) * HEAD_DIM
+FORGET_ROWS_END = (max(FORGET_HEADS) + 1) * HEAD_DIM
+FORGET_MLP_START = _CFG.default_forget_mlp_start
 
 MASKED_SUBMODULES = [
     "self_attn.q_proj.weight",
@@ -34,9 +36,14 @@ MASKED_SUBMODULES = [
 
 @pytest.fixture(scope="session")
 def model_and_masks():
-    model, alphabet = esm.pretrained.esm2_t6_8M_UR50D()
+    import esm as _esm
+    model, alphabet = _esm.pretrained.esm2_t6_8M_UR50D()
     model.eval()
-    retain_mask, forget_mask = build_sgtm_masks(model)
+    retain_mask, forget_mask = build_sgtm_masks(
+        model, head_dim=HEAD_DIM,
+        forget_head_indices=FORGET_HEADS,
+        forget_mlp_start=FORGET_MLP_START,
+    )
     return model, alphabet, retain_mask, forget_mask
 
 
@@ -141,7 +148,11 @@ class TestAblate:
         _, alphabet, _, forget_mask = model_and_masks
         model = copy.deepcopy(model_and_masks[0])
 
-        retain_mask, _ = build_sgtm_masks(model)
+        retain_mask, _ = build_sgtm_masks(
+            model, head_dim=HEAD_DIM,
+            forget_head_indices=FORGET_HEADS,
+            forget_mlp_start=FORGET_MLP_START,
+        )
         retain_values = {}
         for name, param in model.named_parameters():
             if name in forget_mask:

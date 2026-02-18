@@ -22,10 +22,9 @@ from torch.utils.data import DataLoader
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import esm
-
 from sgtm.data_pipeline import MLMCollator
-from sgtm.masking import build_sgtm_masks
+from sgtm.masking import build_sgtm_masks, ablate
+from sgtm.model_config import get_config, load_alphabet, create_model
 
 
 def compute_perplexity(model, loader, device, max_batches=None):
@@ -91,26 +90,34 @@ def ablate_mlp_only(model, forget_mask):
 def main():
     import argparse
     parser = argparse.ArgumentParser()
+    parser.add_argument("--model-size", type=str, default="8M",
+                        help="Model size: 8M or 35M (default: 8M)")
     parser.add_argument("--models-dir", default="models/sgtm")
     parser.add_argument("--data-dir", default="data/sgtm")
     parser.add_argument("--output-dir", default="results/sgtm")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--run-name", default=None,
                         help="SGTM run directory name (auto-detects first sgtm-* dir if not set)")
     args = parser.parse_args()
 
+    cfg = get_config(args.model_size)
+
     os.makedirs(args.output_dir, exist_ok=True)
 
     # Load test data
-    _, alphabet = esm.pretrained.esm2_t6_8M_UR50D()
+    alphabet = load_alphabet()
     collator = MLMCollator(alphabet, mask_ratio=0.15, max_length=1022)
+    pin = args.device != "cpu"
 
     test_loaders = {}
     for split in ("forget", "adjacent", "retain"):
         ds = load_from_disk(os.path.join(args.data_dir, split, "test"))
         test_loaders[split] = DataLoader(ds, batch_size=args.batch_size,
-                                         collate_fn=collator, shuffle=False)
+                                         collate_fn=collator, shuffle=False,
+                                         num_workers=args.num_workers,
+                                         pin_memory=pin)
 
     # Find SGTM run directory
     if args.run_name:
@@ -140,8 +147,7 @@ def main():
         print("WARNING: No saved masks found, will recompute with defaults")
 
     def load_fresh():
-        model = esm.model.esm2.ESM2(
-            num_layers=6, embed_dim=320, attention_heads=20, alphabet=alphabet)
+        model, _ = create_model(cfg, alphabet)
         model.load_state_dict(torch.load(ckpt, map_location=args.device, weights_only=True))
         model = model.to(args.device)
         model.eval()
@@ -150,7 +156,11 @@ def main():
     def get_masks(model):
         if saved_masks:
             return saved_masks["retain_mask"], saved_masks["forget_mask"]
-        return build_sgtm_masks(model)
+        return build_sgtm_masks(
+            model, head_dim=cfg.head_dim,
+            forget_head_indices=list(cfg.default_forget_heads),
+            forget_mlp_start=cfg.default_forget_mlp_start,
+        )
 
     results = {}
 

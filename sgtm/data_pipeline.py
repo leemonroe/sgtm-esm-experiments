@@ -6,6 +6,7 @@ forget/adjacent/ambiguous/retain categories, and save as HuggingFace datasets.
 import argparse
 import gzip
 import os
+import re
 import urllib.request
 from typing import Dict, List, Tuple
 
@@ -40,10 +41,20 @@ def download_swissprot(output_path: str) -> str:
     return output_path
 
 
-def parse_fasta_gz(path: str) -> List[str]:
-    """Parse a gzipped FASTA file, returning a list of sequences."""
+def parse_fasta_gz(path: str, return_headers: bool = False):
+    """Parse a gzipped FASTA file.
+
+    Args:
+        path: Path to .fasta.gz file.
+        return_headers: If True, return (sequences, headers) tuple.
+
+    Returns:
+        List of sequences, or (sequences, headers) if return_headers=True.
+    """
     sequences = []
+    headers = []
     current_seq_parts: List[str] = []
+    current_header = ""
 
     with gzip.open(path, "rt") as f:
         for line in f:
@@ -51,13 +62,18 @@ def parse_fasta_gz(path: str) -> List[str]:
             if line.startswith(">"):
                 if current_seq_parts:
                     sequences.append("".join(current_seq_parts))
+                    headers.append(current_header)
                     current_seq_parts = []
+                current_header = line
             else:
                 current_seq_parts.append(line)
         if current_seq_parts:
             sequences.append("".join(current_seq_parts))
+            headers.append(current_header)
 
     print(f"Parsed {len(sequences):,} sequences from {path}")
+    if return_headers:
+        return sequences, headers
     return sequences
 
 
@@ -94,14 +110,52 @@ def is_valid_sequence(seq: str) -> bool:
     )
 
 
+# Regex to extract OS= field from UniProt FASTA headers
+_OS_PATTERN = re.compile(r"OS=(.+?)(?:\s+OX=|\s+GN=|\s+PE=|\s*$)")
+
+# Keywords indicating a viral organism (case-insensitive match on OS= field)
+_VIRAL_KEYWORDS = ("virus", "phage", "viridae", "viral", "virales")
+
+
+def _is_viral_header(header: str) -> bool:
+    """Check if a Swiss-Prot FASTA header indicates a viral organism.
+
+    Swiss-Prot headers have the format:
+        >sp|P12345|NAME_ORGANISM Description OS=Organism name OX=TaxID ...
+
+    We check the OS= field for viral keywords.
+    """
+    match = _OS_PATTERN.search(header)
+    if not match:
+        return False
+    organism = match.group(1).lower()
+    return any(kw in organism for kw in _VIRAL_KEYWORDS)
+
+
 def filter_swissprot(
     swissprot_seqs: List[str],
     virus_seqs_to_exclude: set,
-) -> List[str]:
-    """Filter Swiss-Prot: valid AAs, length 30-1022, deduplicate against virus data."""
-    filtered = []
+    headers: List[str] = None,
+) -> Tuple[List[str], List[str]]:
+    """Filter Swiss-Prot: valid AAs, length 30-1022, deduplicate against virus data.
+
+    Also identifies viral proteins by FASTA header keyword matching.
+    These would contaminate the retain set if not separated.
+
+    NOTE: The 8M experiments did NOT have this viral header filter. Swiss-Prot
+    contains ~16K viral proteins beyond our virus TSV files, which leaked into
+    the retain set in the 8M runs. This is fixed here for 35M onwards.
+
+    Returns:
+        (retain_seqs, viral_swissprot_seqs): Non-viral sequences for retain set,
+        and viral Swiss-Prot sequences to route to the ambiguous set.
+    """
+    retain = []
+    viral_swissprot = []
     seen = set()
-    for seq in swissprot_seqs:
+    n_viral_header = 0
+
+    for i, seq in enumerate(swissprot_seqs):
         if not is_valid_sequence(seq):
             continue
         if seq in virus_seqs_to_exclude:
@@ -109,10 +163,20 @@ def filter_swissprot(
         if seq in seen:
             continue
         seen.add(seq)
-        filtered.append(seq)
 
-    print(f"Swiss-Prot after filtering: {len(filtered):,} / {len(swissprot_seqs):,}")
-    return filtered
+        # Check if this is a viral protein by header
+        if headers and _is_viral_header(headers[i]):
+            viral_swissprot.append(seq)
+            n_viral_header += 1
+        else:
+            retain.append(seq)
+
+    total_filtered = len(retain) + len(viral_swissprot)
+    print(f"Swiss-Prot after filtering: {total_filtered:,} / {len(swissprot_seqs):,}")
+    if n_viral_header > 0:
+        print(f"  Viral proteins detected by header: {n_viral_header:,} (routed to ambiguous)")
+    print(f"  Non-viral retain sequences: {len(retain):,}")
+    return retain, viral_swissprot
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +211,7 @@ def prepare_datasets(
     swissprot_seqs: List[str],
     output_dir: str,
     seed: int = 42,
+    swissprot_headers: List[str] = None,
 ) -> Dict[str, Dataset]:
     """
     Split data into SGTM categories and save as HuggingFace datasets.
@@ -183,9 +248,14 @@ def prepare_datasets(
 
     ambiguous_seqs = ambig_human + ambig_nonhuman
 
-    # Deduplicate Swiss-Prot against all virus sequences
+    # Deduplicate Swiss-Prot against all virus sequences, and filter viral proteins
     all_virus = set(human_seqs + nonhuman_seqs)
-    retain_seqs = filter_swissprot(swissprot_seqs, all_virus)
+    retain_seqs, viral_swissprot = filter_swissprot(
+        swissprot_seqs, all_virus, headers=swissprot_headers,
+    )
+
+    # Route Swiss-Prot viral proteins to the ambiguous set (default mode = all params update)
+    ambiguous_seqs = ambiguous_seqs + viral_swissprot
 
     # Split each category into train/val/test
     # forget: ~90/5/5 of the 90% virus_human
@@ -334,14 +404,17 @@ def main():
     fasta_path = os.path.join(args.raw_dir, "uniprot_sprot.fasta.gz")
     download_swissprot(fasta_path)
 
-    # Step 2: Parse Swiss-Prot
-    swissprot_seqs = parse_fasta_gz(fasta_path)
+    # Step 2: Parse Swiss-Prot (with headers for viral protein detection)
+    swissprot_seqs, swissprot_headers = parse_fasta_gz(fasta_path, return_headers=True)
 
     # Step 3: Load virus data
     human_seqs, nonhuman_seqs = load_virus_data(args.raw_dir)
 
     # Step 4: Prepare and save datasets
-    prepare_datasets(human_seqs, nonhuman_seqs, swissprot_seqs, args.data_dir, seed=args.seed)
+    prepare_datasets(
+        human_seqs, nonhuman_seqs, swissprot_seqs, args.data_dir,
+        seed=args.seed, swissprot_headers=swissprot_headers,
+    )
 
 
 if __name__ == "__main__":

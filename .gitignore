@@ -10,6 +10,9 @@
 !sgtm/evaluate_sgtm.py
 !sgtm/ablation_experiments.py
 !sgtm/test_masking.py
+!sgtm/model_config.py
+!sgtm/linear_probe.py
+!sgtm/experiment_options.md
 
 # Raw virus data (needed for data pipeline)
 !data/

@@ -6,8 +6,11 @@ def build_sgtm_masks(
     model,
     forget_head_indices: List[int] = [17, 18, 19],
     forget_mlp_start: int = 1120,
+    head_dim: int = None,
 ) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
-    head_dim = 16
+    if head_dim is None:
+        # Infer from model: embed_dim / attention_heads
+        head_dim = model.embed_dim // model.attention_heads
     forget_rows_start = min(forget_head_indices) * head_dim  # 272
     forget_rows_end = (max(forget_head_indices) + 1) * head_dim  # 320
 
@@ -81,6 +84,7 @@ def register_gradient_routing_hooks(
     model,
     forget_head_indices: List[int] = [17, 18, 19],
     forget_mlp_start: int = 1120,
+    head_dim: int = None,
 ) -> Tuple[List[torch.utils.hooks.RemovableHandle], List]:
     """Register forward pre-hooks that detach activation dims to route gradients.
 
@@ -93,31 +97,35 @@ def register_gradient_routing_hooks(
     Returns (hook_handles, sgtm_mode_ref) where sgtm_mode_ref is a mutable
     list ["default"] that the training loop sets before each forward pass.
     """
-    head_dim = 16
+    if head_dim is None:
+        head_dim = model.embed_dim // model.attention_heads
+    embed_dim = model.embed_dim
+
     forget_start = min(forget_head_indices) * head_dim
     forget_end = (max(forget_head_indices) + 1) * head_dim
 
     sgtm_mode_ref = ["default"]
     handles = []
 
-    def _detach_dims(x, retain_slice, forget_slice, mode):
-        """Detach a slice of dimensions from tensor x, returning modified x."""
-        if mode == "default":
-            return x
+    def _detach_retain_dims(x, forget_start, forget_end):
+        """Detach all non-forget (retain) dims. Used in 'forget' mode."""
         out = x.clone()
-        if mode == "forget":
-            # Detach retain dims so only forget params get gradients
-            out[..., retain_slice] = x[..., retain_slice].detach()
-        elif mode == "retain":
-            # Detach forget dims so only retain params get gradients
-            out[..., forget_slice] = x[..., forget_slice].detach()
+        if forget_start > 0:
+            out[..., :forget_start] = x[..., :forget_start].detach()
+        if forget_end < x.shape[-1]:
+            out[..., forget_end:] = x[..., forget_end:].detach()
         return out
 
-    # Slices for attention (out_proj input) and MLP (fc2 input)
-    attn_retain_slice = slice(0, forget_start)
-    attn_forget_slice = slice(forget_start, forget_end)
-    mlp_retain_slice = slice(0, forget_mlp_start)
-    mlp_forget_slice = slice(forget_mlp_start, None)
+    def _detach_forget_dims(x, forget_start, forget_end):
+        """Detach forget dims. Used in 'retain' mode."""
+        out = x.clone()
+        out[..., forget_start:forget_end] = x[..., forget_start:forget_end].detach()
+        return out
+
+    # Dim ranges for attention and MLP
+    attn_forget_start = forget_start
+    attn_forget_end = forget_end
+    mlp_forget_start = forget_mlp_start
 
     for layer in model.layers:
         # Pre-hook on out_proj: intercepts merged attention head output
@@ -127,7 +135,10 @@ def register_gradient_routing_hooks(
                 if mode == "default":
                     return args
                 x = args[0]
-                x = _detach_dims(x, attn_retain_slice, attn_forget_slice, mode)
+                if mode == "forget":
+                    x = _detach_retain_dims(x, attn_forget_start, attn_forget_end)
+                elif mode == "retain":
+                    x = _detach_forget_dims(x, attn_forget_start, attn_forget_end)
                 return (x,) + args[1:]
             return hook
 
@@ -141,7 +152,10 @@ def register_gradient_routing_hooks(
                 if mode == "default":
                     return args
                 x = args[0]
-                x = _detach_dims(x, mlp_retain_slice, mlp_forget_slice, mode)
+                if mode == "forget":
+                    x = _detach_retain_dims(x, mlp_forget_start, x.shape[-1])
+                elif mode == "retain":
+                    x = _detach_forget_dims(x, mlp_forget_start, x.shape[-1])
                 return (x,) + args[1:]
             return hook
 

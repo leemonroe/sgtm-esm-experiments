@@ -23,10 +23,15 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import esm
-
 from sgtm.data_pipeline import MLMCollator
 from sgtm.masking import ablate, build_sgtm_masks
+from sgtm.model_config import get_config, load_alphabet, load_model_from_checkpoint as _load_model
+
+try:
+    import wandb
+    HAS_WANDB = True
+except ImportError:
+    HAS_WANDB = False
 
 
 def compute_perplexity(model, loader, device, max_batches=None):
@@ -57,17 +62,9 @@ def compute_perplexity(model, loader, device, max_batches=None):
     return math.exp(avg_loss)
 
 
-def load_model_from_checkpoint(checkpoint_path, device):
-    """Load an ESM-2 8M model from a state_dict checkpoint."""
-    _, alphabet = esm.pretrained.esm2_t6_8M_UR50D()
-    model = esm.model.esm2.ESM2(
-        num_layers=6, embed_dim=320, attention_heads=20, alphabet=alphabet,
-    )
-    state_dict = torch.load(checkpoint_path, map_location=device, weights_only=True)
-    model.load_state_dict(state_dict)
-    model = model.to(device)
-    model.eval()
-    return model, alphabet
+def load_eval_model(checkpoint_path, device, cfg):
+    """Load a trained ESM-2 model from a state_dict checkpoint using config."""
+    return _load_model(cfg, checkpoint_path, device)
 
 
 def evaluate_model(model, test_loaders, device):
@@ -176,28 +173,50 @@ def plot_training_curves(models_dir, output_path):
 
 def main():
     parser = argparse.ArgumentParser(description="SGTM evaluation")
+    parser.add_argument("--model-size", type=str, default="8M",
+                        help="Model size: 8M or 35M (default: 8M)")
     parser.add_argument("--models-dir", default="models/sgtm")
     parser.add_argument("--data-dir", default="data/sgtm")
     parser.add_argument("--output-dir", default="results/sgtm")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--max-length", type=int, default=1022)
+    parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--runs", type=str, default=None,
                         help="Comma-separated run names to evaluate (default: auto-detect)")
+    parser.add_argument("--wandb-project", type=str, default=None,
+                        help="Wandb project name (default: sgtm-esm2-{model_size})")
+    parser.add_argument("--no-wandb", action="store_true", help="Disable wandb logging")
     args = parser.parse_args()
+
+    cfg = get_config(args.model_size)
+    if args.wandb_project is None:
+        args.wandb_project = f"sgtm-esm2-{cfg.name.lower()}"
 
     os.makedirs(args.output_dir, exist_ok=True)
 
+    # Wandb
+    use_wandb = HAS_WANDB and not args.no_wandb
+    if use_wandb:
+        wandb.init(
+            project=args.wandb_project,
+            name=f"eval-{cfg.name}",
+            job_type="evaluation",
+            config=vars(args),
+        )
+
     # Load test sets
-    print("Loading test datasets...")
-    _, alphabet = esm.pretrained.esm2_t6_8M_UR50D()
+    print(f"Loading test datasets (model: ESM-2 {cfg.name})...")
+    alphabet = load_alphabet()
     collator = MLMCollator(alphabet, mask_ratio=0.15, max_length=args.max_length)
+    pin = args.device != "cpu"
 
     test_loaders = {}
     for split in ("forget", "adjacent", "retain"):
         ds = load_from_disk(os.path.join(args.data_dir, split, "test"))
         test_loaders[split] = DataLoader(
             ds, batch_size=args.batch_size, collate_fn=collator, shuffle=False,
+            num_workers=args.num_workers, pin_memory=pin,
         )
         print(f"  {split}: {len(ds)} sequences")
 
@@ -229,7 +248,7 @@ def main():
         print(f"Evaluating: {run_name}")
         print(f"{'='*40}")
 
-        model, _ = load_model_from_checkpoint(ckpt_path, args.device)
+        model, _ = load_eval_model(ckpt_path, args.device, cfg)
         results = evaluate_model(model, test_loaders, args.device)
         all_results[run_name] = results
 
@@ -247,11 +266,16 @@ def main():
                 forget_mask = saved["forget_mask"]
                 print(f"  Loaded masks from {masks_path}")
             else:
-                print(f"  WARNING: No masks.pt found! Using DEFAULT 3-head masks.")
-                print(f"  This is WRONG for 1-head variants. Check {masks_path}")
-                retain_mask, forget_mask = build_sgtm_masks(model)
+                print(f"  WARNING: No masks.pt found! Using config default masks.")
+                retain_mask, forget_mask = build_sgtm_masks(
+                    model, head_dim=cfg.head_dim,
+                    forget_head_indices=list(cfg.default_forget_heads),
+                    forget_mlp_start=cfg.default_forget_mlp_start,
+                )
 
             ablate(model, forget_mask)
+            # Reset seed so ablation eval uses same MLM masks as pre-ablation
+            torch.manual_seed(42)
             ablated_results = evaluate_model(model, test_loaders, args.device)
             all_results[f"{run_name}_ablated"] = ablated_results
 
@@ -273,6 +297,13 @@ def main():
     with open(results_path, "w") as f:
         json.dump(all_results, f, indent=2)
     print(f"\nResults saved to {results_path}")
+
+    # Log to wandb
+    if use_wandb:
+        for name, results in all_results.items():
+            for split, ppl in results.items():
+                wandb.log({f"ppl/{name}/{split}": ppl})
+        wandb.log({"all_results": all_results})
 
     # Plots
     if len(all_results) > 1:
@@ -304,6 +335,9 @@ def main():
                 retain_ratio = all_results[ablated_key]["retain"] / baseline_retain
                 print(f"  Retain PPL ratio (ablated/baseline): {retain_ratio:.2f}x")
             print(f"  Goal: forget increase >> 1, retain ratio ≈ 1")
+
+    if use_wandb:
+        wandb.finish()
 
 
 if __name__ == "__main__":
