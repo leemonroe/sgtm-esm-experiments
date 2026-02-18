@@ -180,7 +180,11 @@ def main():
     # Logging
     parser.add_argument("--log-interval", type=int, default=100)
     parser.add_argument("--eval-interval", type=int, default=2000)
-    parser.add_argument("--save-interval", type=int, default=10000)
+    parser.add_argument("--save-interval", type=int, default=2000)
+
+    # Resume
+    parser.add_argument("--resume", type=str, default=None,
+                        help="Path to checkpoint to resume from (e.g. models/sgtm/holdout/checkpoint_10000.pt)")
 
     # Wandb
     parser.add_argument("--wandb-project", type=str, default=None,
@@ -371,20 +375,44 @@ def main():
     scheduler = SequentialLR(optimizer, [warmup, cosine], milestones=[args.warmup_steps])
 
     # ------------------------------------------------------------------
+    # Resume from checkpoint
+    # ------------------------------------------------------------------
+    start_step = 0
+    history = {"train_loss": [], "val_losses": [], "config": vars(args)}
+    best_val_loss = float("inf")
+
+    if args.resume:
+        print(f"\nResuming from {args.resume}...")
+        ckpt = torch.load(args.resume, map_location=args.device, weights_only=False)
+        model.load_state_dict(ckpt["model_state_dict"])
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+        start_step = ckpt["step"]
+        best_val_loss = ckpt["best_val_loss"]
+        history = ckpt["history"]
+        # Restore RNG states
+        torch.random.set_rng_state(ckpt["torch_rng_state"])
+        if ckpt.get("cuda_rng_state") is not None:
+            torch.cuda.set_rng_state(ckpt["cuda_rng_state"])
+        random.setstate(ckpt["python_rng_state"])
+        np.random.set_state(ckpt["numpy_rng_state"])
+        print(f"Resumed at step {start_step}")
+
+    # ------------------------------------------------------------------
     # Training loop
     # ------------------------------------------------------------------
     print(f"\n{'='*60}")
     print(f"TRAINING: {args.mode}")
     print(f"LR={args.lr}, batch={args.batch_size}×{args.grad_accum}={args.batch_size*args.grad_accum}")
+    if start_step > 0:
+        print(f"RESUMING from step {start_step}")
     print(f"{'='*60}\n")
 
     model.train()
-    history = {"train_loss": [], "val_losses": [], "config": vars(args)}
-    best_val_loss = float("inf")
     running_loss = 0.0
     start_time = time.time()
 
-    for step in tqdm(range(actual_steps), desc=f"Training ({args.mode})"):
+    for step in tqdm(range(start_step, actual_steps), desc=f"Training ({args.mode})", initial=start_step, total=actual_steps):
         source = data_split_order[step]
 
         # Map source to SGTM mode
@@ -461,9 +489,20 @@ def main():
                 best_val_loss = val_results["retain"]
                 torch.save(model.state_dict(), os.path.join(run_dir, "best_model.pt"))
 
-        # Periodic save
+        # Periodic save (full training state for resumability)
         if (step + 1) % args.save_interval == 0:
-            torch.save(model.state_dict(), os.path.join(run_dir, f"checkpoint_{step+1}.pt"))
+            torch.save({
+                "step": step + 1,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict(),
+                "best_val_loss": best_val_loss,
+                "history": history,
+                "torch_rng_state": torch.random.get_rng_state(),
+                "cuda_rng_state": torch.cuda.get_rng_state() if args.device != "cpu" else None,
+                "python_rng_state": random.getstate(),
+                "numpy_rng_state": np.random.get_state(),
+            }, os.path.join(run_dir, f"checkpoint_{step+1}.pt"))
 
     # ------------------------------------------------------------------
     # Save final model + history
