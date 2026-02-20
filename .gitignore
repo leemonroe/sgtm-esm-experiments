@@ -13,6 +13,8 @@
 !sgtm/model_config.py
 !sgtm/linear_probe.py
 !sgtm/experiment_options.md
+!sgtm/visualize_results.py
+!sgtm/results_35m.md
 
 # Raw virus data (needed for data pipeline)
 !data/
