@@ -65,6 +65,40 @@ SGTM models pay a retain PPL cost of ~3.5-3.7 points vs holdout, reflecting the 
 
 The key finding from 8M — that attention-only ablation preserves general capability — **does not replicate at 35M scale**. Scale made the problem worse, not better.
 
+### Linear Probe: Downstream Classification
+
+Linear probes (logistic regression on mean-pooled last-layer embeddings) test whether the model's internal representations encode viral knowledge, independent of its ability to generate coherent token predictions.
+
+**Task 1: Human-infecting vs non-human viral protein classification**
+
+| Condition | Accuracy | Std |
+|---|---|---|
+| Holdout | **98.0%** | 0.5% |
+| SGTM Attn-Only | 94.6% | 1.9% |
+| SGTM Attn-Only ablated | 88.2% | 1.7% |
+| SGTM Attn+MLP | 85.5% | 10.3% |
+| SGTM Attn+MLP ablated | 80.2% | 1.3% |
+
+**Task 2: Viral vs non-viral protein classification**
+
+| Condition | Accuracy | Std |
+|---|---|---|
+| Holdout | **90.0%** | 5.4% |
+| SGTM Attn-Only | 80.0% | 12.9% |
+| SGTM Attn-Only ablated | 81.3% | 5.8% |
+| SGTM Attn+MLP | 83.7% | 4.8% |
+| SGTM Attn+MLP ablated | 78.8% | 3.4% |
+
+These results reveal a critical disconnect between perplexity and representation-level knowledge:
+
+1. **The holdout model is the best viral classifier** (98.0% task 1, 90.0% task 2) despite never seeing forget-set data. It learned enough about viral proteins from the adjacent/ambiguous data and from general protein structure to classify viruses with near-perfect accuracy. **This fundamentally undermines data filtering as a safety measure** — withholding training data does not prevent the model from acquiring the capability.
+
+2. **Ablation barely affects classification despite destroying PPL.** The attn-only model drops only 6.4 percentage points on task 1 after ablation (94.6% → 88.2%), and actually *improves slightly* on task 2 (80.0% → 81.3%). The model's representations still encode viral knowledge even when ablation makes it unable to generate coherent tokens.
+
+3. **PPL and downstream capability measure fundamentally different things.** Ablation destroys the model's token prediction mechanism (the "output head") but the internal representations — the residual stream embeddings — retain structural information sufficient for viral classification. The knowledge lives in the geometry of the representation space, not solely in the parameters that were ablated.
+
+4. **Implication for biosecurity**: Even if a future ablation method successfully preserved PPL while removing viral generation capability, the linear probe results suggest the model's representations would still encode viral knowledge accessible via fine-tuning or probing. This raises the bar for what "knowledge removal" means — it's not enough to break generation; the representations themselves must be scrubbed.
+
 ---
 
 ## Analysis
@@ -88,11 +122,16 @@ The key finding from 8M — that attention-only ablation preserves general capab
 
 2. **The 8M attention-only success was likely an artifact of model simplicity**, not evidence that SGTM works. The 6-layer model had enough redundancy that removing 3 attention heads could be compensated for. This does not generalize.
 
-3. **Alternative approaches to explore:**
+3. **Data filtering (holdout) does not prevent capability acquisition.** The holdout model — which never saw human-infecting viral proteins during training — achieved 98% accuracy classifying them. Protein structure is shared across domains; a model trained on general proteins inherently learns representations useful for viral classification. This is a fundamental challenge for data-filtering approaches to biosecurity in protein language models.
+
+4. **Representation-level knowledge persists through ablation.** Even when ablation catastrophically destroys generation capability (PPL → 10²²), linear probes show the model's embeddings still encode viral knowledge (80-88% classification accuracy). Any viable approach to knowledge removal must address the representation geometry, not just the output mechanism.
+
+5. **Alternative approaches to explore:**
    - Adapter/LoRA-style modules that can be physically removed (no residual stream entanglement)
    - Post-hoc editing methods (ROME, MEMIT) that target specific factual associations
    - Knowledge distillation from a full model to a retain-only model
    - Representation engineering / activation steering approaches
+   - Differential privacy during training to limit memorization of specific sequences
 
 ---
 
@@ -111,3 +150,4 @@ The key finding from 8M — that attention-only ablation preserves general capab
 - `results/sgtm/8m_vs_35m_comparison.png` — Cross-scale comparison
 - `results/sgtm/holdout_vs_sgtm_retain.png` — Holdout vs SGTM retain cost
 - `results/sgtm/training_curves.png` — Training loss over time
+- `results/sgtm/linear_probe_results.json` — Linear probe classification accuracies
