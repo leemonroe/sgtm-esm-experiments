@@ -15,6 +15,7 @@
 !sgtm/experiment_options.md
 !sgtm/visualize_results.py
 !sgtm/results_35m.md
+!sgtm/bioriskeval_mut.py
 
 # Raw virus data (needed for data pipeline)
 !data/
