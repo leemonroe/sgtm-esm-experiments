@@ -1,6 +1,16 @@
 """
 SGTM data pipeline: download Swiss-Prot, split virus/non-virus data into
-forget/adjacent/ambiguous/retain categories, and save as HuggingFace datasets.
+forget/adjacent/retain categories, and save as HuggingFace datasets.
+
+Supports multiple forget task granularities:
+  - "coarse":  forget = ALL viral proteins, retain = non-viral (no adjacent)
+  - "fine":    forget = human-infecting viral, adjacent = other viral, retain = non-viral
+  - "custom":  forget = user-provided TSV, adjacent = remaining viral, retain = non-viral
+
+Usage:
+  python -m sgtm.data_pipeline --forget-task coarse
+  python -m sgtm.data_pipeline --forget-task fine
+  python -m sgtm.data_pipeline --forget-task custom --forget-tsv data/raw/my_forget_set.tsv
 """
 
 import argparse
@@ -8,7 +18,7 @@ import gzip
 import os
 import re
 import urllib.request
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 from datasets import Dataset
@@ -42,15 +52,7 @@ def download_swissprot(output_path: str) -> str:
 
 
 def parse_fasta_gz(path: str, return_headers: bool = False):
-    """Parse a gzipped FASTA file.
-
-    Args:
-        path: Path to .fasta.gz file.
-        return_headers: If True, return (sequences, headers) tuple.
-
-    Returns:
-        List of sequences, or (sequences, headers) if return_headers=True.
-    """
+    """Parse a gzipped FASTA file."""
     sequences = []
     headers = []
     current_seq_parts: List[str] = []
@@ -77,25 +79,16 @@ def parse_fasta_gz(path: str, return_headers: bool = False):
     return sequences
 
 
-def load_virus_data(raw_dir: str) -> Tuple[List[str], List[str]]:
-    """Load human-infecting and non-human virus sequences from TSV files."""
-    human_path = os.path.join(raw_dir, "virus_human.tsv")
-    nonhuman_path = os.path.join(raw_dir, "virus_nonhuman.tsv")
-
-    def read_tsv_sequences(path: str) -> List[str]:
-        seqs = []
-        with open(path) as f:
-            header = f.readline()  # skip header
-            for line in f:
-                parts = line.strip().split("\t")
-                if len(parts) >= 4:
-                    seqs.append(parts[3])  # Sequence column
-        return seqs
-
-    human_seqs = read_tsv_sequences(human_path)
-    nonhuman_seqs = read_tsv_sequences(nonhuman_path)
-    print(f"Loaded virus data: {len(human_seqs):,} human, {len(nonhuman_seqs):,} non-human")
-    return human_seqs, nonhuman_seqs
+def load_tsv_sequences(path: str) -> List[str]:
+    """Load sequences from a TSV file with a 'Sequence' column (index 3)."""
+    seqs = []
+    with open(path) as f:
+        f.readline()  # skip header
+        for line in f:
+            parts = line.strip().split("\t")
+            if len(parts) >= 4:
+                seqs.append(parts[3])
+    return seqs
 
 
 # ---------------------------------------------------------------------------
@@ -118,13 +111,7 @@ _VIRAL_KEYWORDS = ("virus", "phage", "viridae", "viral", "virales")
 
 
 def _is_viral_header(header: str) -> bool:
-    """Check if a Swiss-Prot FASTA header indicates a viral organism.
-
-    Swiss-Prot headers have the format:
-        >sp|P12345|NAME_ORGANISM Description OS=Organism name OX=TaxID ...
-
-    We check the OS= field for viral keywords.
-    """
+    """Check if a Swiss-Prot FASTA header indicates a viral organism."""
     match = _OS_PATTERN.search(header)
     if not match:
         return False
@@ -134,48 +121,35 @@ def _is_viral_header(header: str) -> bool:
 
 def filter_swissprot(
     swissprot_seqs: List[str],
-    virus_seqs_to_exclude: set,
+    seqs_to_exclude: set,
     headers: List[str] = None,
 ) -> Tuple[List[str], List[str]]:
-    """Filter Swiss-Prot: valid AAs, length 30-1022, deduplicate against virus data.
-
-    Also identifies viral proteins by FASTA header keyword matching.
-    These would contaminate the retain set if not separated.
-
-    NOTE: The 8M experiments did NOT have this viral header filter. Swiss-Prot
-    contains ~16K viral proteins beyond our virus TSV files, which leaked into
-    the retain set in the 8M runs. This is fixed here for 35M onwards.
+    """Filter Swiss-Prot into non-viral (retain) and viral sequences.
 
     Returns:
-        (retain_seqs, viral_swissprot_seqs): Non-viral sequences for retain set,
-        and viral Swiss-Prot sequences to route to the ambiguous set.
+        (retain_seqs, viral_swissprot_seqs)
     """
     retain = []
     viral_swissprot = []
     seen = set()
-    n_viral_header = 0
 
     for i, seq in enumerate(swissprot_seqs):
         if not is_valid_sequence(seq):
             continue
-        if seq in virus_seqs_to_exclude:
+        if seq in seqs_to_exclude:
             continue
         if seq in seen:
             continue
         seen.add(seq)
 
-        # Check if this is a viral protein by header
         if headers and _is_viral_header(headers[i]):
             viral_swissprot.append(seq)
-            n_viral_header += 1
         else:
             retain.append(seq)
 
-    total_filtered = len(retain) + len(viral_swissprot)
-    print(f"Swiss-Prot after filtering: {total_filtered:,} / {len(swissprot_seqs):,}")
-    if n_viral_header > 0:
-        print(f"  Viral proteins detected by header: {n_viral_header:,} (routed to ambiguous)")
-    print(f"  Non-viral retain sequences: {len(retain):,}")
+    print(f"Swiss-Prot after filtering: {len(retain) + len(viral_swissprot):,} / {len(swissprot_seqs):,}")
+    print(f"  Viral (by header): {len(viral_swissprot):,}")
+    print(f"  Non-viral (retain): {len(retain):,}")
     return retain, viral_swissprot
 
 
@@ -205,104 +179,115 @@ def _seqs_to_dataset(seqs: List[str]) -> Dataset:
     })
 
 
-def prepare_datasets(
-    human_seqs: List[str],
-    nonhuman_seqs: List[str],
-    swissprot_seqs: List[str],
+def _save_category(seqs_train, seqs_val, seqs_test, name, output_dir, results):
+    """Save a train/val/test split as HuggingFace datasets."""
+    cat_dir = os.path.join(output_dir, name)
+    for split_name, split_seqs in [("train", seqs_train), ("val", seqs_val), ("test", seqs_test)]:
+        ds = _seqs_to_dataset(split_seqs)
+        ds.save_to_disk(os.path.join(cat_dir, split_name))
+        results[f"{name}_{split_name}"] = ds
+    print(f"  {name}: {len(seqs_train)} train / {len(seqs_val)} val / {len(seqs_test)} test")
+
+
+# ---------------------------------------------------------------------------
+# Dataset preparation (task-specific)
+# ---------------------------------------------------------------------------
+
+def prepare_coarse(
+    all_viral_seqs: List[str],
+    retain_seqs: List[str],
     output_dir: str,
-    seed: int = 42,
-    swissprot_headers: List[str] = None,
+    rng,
 ) -> Dict[str, Dataset]:
+    """Coarse task: forget ALL viral proteins, retain non-viral.
+
+    No adjacent category — clean two-way split.
     """
-    Split data into SGTM categories and save as HuggingFace datasets.
+    print(f"\n--- Coarse task: viral vs non-viral ---")
+    print(f"Forget (all viral): {len(all_viral_seqs)}")
+    print(f"Retain (non-viral): {len(retain_seqs)}")
 
-    Categories:
-      - forget:    90% of virus_human
-      - adjacent:  90% of virus_nonhuman
-      - ambiguous: 10% of both virus sets (the "default" partition)
-      - retain:    filtered Swiss-Prot remainder
-    """
-    import random
-    rng = random.Random(seed)
-
-    # Filter virus sequences too
-    human_seqs = [s for s in human_seqs if is_valid_sequence(s)]
-    nonhuman_seqs = [s for s in nonhuman_seqs if is_valid_sequence(s)]
-    print(f"Valid virus sequences: {len(human_seqs)} human, {len(nonhuman_seqs)} non-human")
-
-    # Shuffle before splitting
-    human_idx = list(range(len(human_seqs)))
-    nonhuman_idx = list(range(len(nonhuman_seqs)))
-    rng.shuffle(human_idx)
-    rng.shuffle(nonhuman_idx)
-
-    # 90/10 split for each virus set
-    human_90 = int(len(human_seqs) * 0.9)
-    nonhuman_90 = int(len(nonhuman_seqs) * 0.9)
-
-    forget_seqs = [human_seqs[i] for i in human_idx[:human_90]]
-    ambig_human = [human_seqs[i] for i in human_idx[human_90:]]
-
-    adjacent_seqs = [nonhuman_seqs[i] for i in nonhuman_idx[:nonhuman_90]]
-    ambig_nonhuman = [nonhuman_seqs[i] for i in nonhuman_idx[nonhuman_90:]]
-
-    ambiguous_seqs = ambig_human + ambig_nonhuman
-
-    # Deduplicate Swiss-Prot against all virus sequences, and filter viral proteins
-    all_virus = set(human_seqs + nonhuman_seqs)
-    retain_seqs, viral_swissprot = filter_swissprot(
-        swissprot_seqs, all_virus, headers=swissprot_headers,
-    )
-
-    # Route Swiss-Prot viral proteins to the ambiguous set (default mode = all params update)
-    ambiguous_seqs = ambiguous_seqs + viral_swissprot
-
-    # Split each category into train/val/test
-    # forget: ~90/5/5 of the 90% virus_human
     forget_train, forget_val, forget_test = _split_three(
-        forget_seqs, (0.90, 0.05, 0.05), rng
+        all_viral_seqs, (0.90, 0.05, 0.05), rng
     )
-    # adjacent: same split
-    adj_train, adj_val, adj_test = _split_three(
-        adjacent_seqs, (0.90, 0.05, 0.05), rng
-    )
-    # retain: 95/2.5/2.5
     ret_train, ret_val, ret_test = _split_three(
         retain_seqs, (0.95, 0.025, 0.025), rng
     )
 
-    print(f"\n--- Dataset sizes ---")
-    print(f"Forget:    {len(forget_train)} train / {len(forget_val)} val / {len(forget_test)} test")
-    print(f"Adjacent:  {len(adj_train)} train / {len(adj_val)} val / {len(adj_test)} test")
-    print(f"Ambiguous: {len(ambiguous_seqs)} total (no split)")
-    print(f"Retain:    {len(ret_train)} train / {len(ret_val)} val / {len(ret_test)} test")
-
-    # Build and save datasets
     os.makedirs(output_dir, exist_ok=True)
     results = {}
 
-    splits_map = {
-        "forget": (forget_train, forget_val, forget_test),
-        "adjacent": (adj_train, adj_val, adj_test),
-        "retain": (ret_train, ret_val, ret_test),
+    print(f"\n--- Dataset sizes ---")
+    _save_category(forget_train, forget_val, forget_test, "forget", output_dir, results)
+    _save_category(ret_train, ret_val, ret_test, "retain", output_dir, results)
+
+    # Write manifest
+    manifest = {
+        "forget_task": "coarse",
+        "categories": ["forget", "retain"],
+        "forget_description": "All viral proteins (curated + Swiss-Prot header-detected)",
+        "retain_description": "Non-viral Swiss-Prot proteins",
     }
+    _write_manifest(manifest, output_dir)
 
-    for name, (train, val, test) in splits_map.items():
-        cat_dir = os.path.join(output_dir, name)
-        for split_name, split_seqs in [("train", train), ("val", val), ("test", test)]:
-            ds = _seqs_to_dataset(split_seqs)
-            save_path = os.path.join(cat_dir, split_name)
-            ds.save_to_disk(save_path)
-            results[f"{name}_{split_name}"] = ds
-
-    # Ambiguous: single dataset (no train/val/test split)
-    ambig_ds = _seqs_to_dataset(ambiguous_seqs)
-    ambig_dir = os.path.join(output_dir, "ambiguous")
-    ambig_ds.save_to_disk(ambig_dir)
-    results["ambiguous"] = ambig_ds
-
-    print(f"\nDatasets saved to {output_dir}")
     return results
+
+
+def prepare_fine(
+    forget_seqs: List[str],
+    adjacent_seqs: List[str],
+    retain_seqs: List[str],
+    output_dir: str,
+    rng,
+    forget_description: str = "Human-infecting viral proteins",
+    adjacent_description: str = "Other viral proteins (non-human + Swiss-Prot viral)",
+) -> Dict[str, Dataset]:
+    """Fine task: forget a subset of viral proteins, adjacent = remaining viral.
+
+    Three-way split matching the original SGTM paper's design.
+    """
+    print(f"\n--- Fine task ---")
+    print(f"Forget: {len(forget_seqs)} ({forget_description})")
+    print(f"Adjacent: {len(adjacent_seqs)} ({adjacent_description})")
+    print(f"Retain: {len(retain_seqs)}")
+
+    forget_train, forget_val, forget_test = _split_three(
+        forget_seqs, (0.90, 0.05, 0.05), rng
+    )
+    adj_train, adj_val, adj_test = _split_three(
+        adjacent_seqs, (0.90, 0.05, 0.05), rng
+    )
+    ret_train, ret_val, ret_test = _split_three(
+        retain_seqs, (0.95, 0.025, 0.025), rng
+    )
+
+    os.makedirs(output_dir, exist_ok=True)
+    results = {}
+
+    print(f"\n--- Dataset sizes ---")
+    _save_category(forget_train, forget_val, forget_test, "forget", output_dir, results)
+    _save_category(adj_train, adj_val, adj_test, "adjacent", output_dir, results)
+    _save_category(ret_train, ret_val, ret_test, "retain", output_dir, results)
+
+    manifest = {
+        "forget_task": "fine",
+        "categories": ["forget", "adjacent", "retain"],
+        "forget_description": forget_description,
+        "adjacent_description": adjacent_description,
+        "retain_description": "Non-viral Swiss-Prot proteins",
+    }
+    _write_manifest(manifest, output_dir)
+
+    return results
+
+
+def _write_manifest(manifest: dict, output_dir: str):
+    """Write a JSON manifest describing the dataset configuration."""
+    import json
+    path = os.path.join(output_dir, "manifest.json")
+    with open(path, "w") as f:
+        json.dump(manifest, f, indent=2)
+    print(f"\nManifest saved to {path}")
 
 
 # ---------------------------------------------------------------------------
@@ -310,9 +295,18 @@ def prepare_datasets(
 # ---------------------------------------------------------------------------
 
 class MLMCollator:
-    """Dynamic BERT-style MLM masking at batch time for ESM-2."""
+    """Dynamic BERT-style MLM masking at batch time for ESM-2.
 
-    def __init__(self, alphabet, mask_ratio: float = 0.15, max_length: int = 1022):
+    Args:
+        seed: If provided, creates a dedicated torch.Generator so masking is
+              deterministic and isolated from the global RNG. This is important
+              for evaluation: pre- and post-ablation PPL must use the same masks
+              regardless of other operations that may consume global RNG state.
+              Leave None for training (stochastic masking is desirable).
+    """
+
+    def __init__(self, alphabet, mask_ratio: float = 0.15, max_length: int = 1022,
+                 seed: int = None):
         self.alphabet = alphabet
         self.mask_ratio = mask_ratio
         self.max_length = max_length
@@ -321,6 +315,12 @@ class MLMCollator:
         self.cls_idx = alphabet.cls_idx
         self.eos_idx = alphabet.eos_idx
         self.pad_idx = alphabet.padding_idx
+
+        if seed is not None:
+            self.rng = torch.Generator()
+            self.rng.manual_seed(seed)
+        else:
+            self.rng = None
 
     def _tokenize(self, seq: str) -> torch.Tensor:
         """Tokenize a sequence: [cls] + AAs + [eos], truncated to max_length."""
@@ -342,15 +342,16 @@ class MLMCollator:
 
         n_mask = max(1, int(n_maskable * self.mask_ratio))
         maskable_indices = torch.where(maskable)[0]
-        chosen = maskable_indices[torch.randperm(len(maskable_indices))[:n_mask]]
+        perm = torch.randperm(len(maskable_indices), generator=self.rng)
+        chosen = maskable_indices[perm[:n_mask]]
 
         for idx in chosen:
             labels[idx] = tokens[idx]
-            rand = torch.rand(1).item()
+            rand = torch.rand(1, generator=self.rng).item()
             if rand < 0.8:
                 masked[idx] = self.mask_idx
             elif rand < 0.9:
-                masked[idx] = torch.randint(4, 24, (1,)).item()
+                masked[idx] = torch.randint(4, 24, (1,), generator=self.rng).item()
             # else: keep original
 
         return masked, labels
@@ -395,26 +396,83 @@ class MLMCollator:
 
 def main():
     parser = argparse.ArgumentParser(description="SGTM data pipeline")
-    parser.add_argument("--data-dir", default="data/sgtm", help="Output directory for processed datasets")
-    parser.add_argument("--raw-dir", default="data/raw", help="Directory containing raw virus TSV files")
+    parser.add_argument("--forget-task", choices=["coarse", "fine", "custom"],
+                        default="coarse",
+                        help="Forget task granularity: "
+                             "coarse = all viral vs non-viral; "
+                             "fine = human-infecting vs other; "
+                             "custom = user-provided forget TSV")
+    parser.add_argument("--forget-tsv", type=str, default=None,
+                        help="Path to custom forget set TSV (for --forget-task custom)")
+    parser.add_argument("--data-dir", default="data/sgtm",
+                        help="Output directory for processed datasets")
+    parser.add_argument("--raw-dir", default="data/raw",
+                        help="Directory containing raw virus TSV files")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
+
+    import random
+    rng = random.Random(args.seed)
 
     # Step 1: Download Swiss-Prot
     fasta_path = os.path.join(args.raw_dir, "uniprot_sprot.fasta.gz")
     download_swissprot(fasta_path)
 
-    # Step 2: Parse Swiss-Prot (with headers for viral protein detection)
+    # Step 2: Parse Swiss-Prot
     swissprot_seqs, swissprot_headers = parse_fasta_gz(fasta_path, return_headers=True)
 
-    # Step 3: Load virus data
-    human_seqs, nonhuman_seqs = load_virus_data(args.raw_dir)
+    # Step 3: Load curated virus data
+    human_path = os.path.join(args.raw_dir, "virus_human.tsv")
+    nonhuman_path = os.path.join(args.raw_dir, "virus_nonhuman.tsv")
 
-    # Step 4: Prepare and save datasets
-    prepare_datasets(
-        human_seqs, nonhuman_seqs, swissprot_seqs, args.data_dir,
-        seed=args.seed, swissprot_headers=swissprot_headers,
+    human_seqs = load_tsv_sequences(human_path) if os.path.exists(human_path) else []
+    nonhuman_seqs = load_tsv_sequences(nonhuman_path) if os.path.exists(nonhuman_path) else []
+
+    human_seqs = [s for s in human_seqs if is_valid_sequence(s)]
+    nonhuman_seqs = [s for s in nonhuman_seqs if is_valid_sequence(s)]
+    print(f"Curated virus data: {len(human_seqs)} human, {len(nonhuman_seqs)} non-human")
+
+    # Step 4: Filter Swiss-Prot
+    all_curated_virus = set(human_seqs + nonhuman_seqs)
+    retain_seqs, viral_swissprot = filter_swissprot(
+        swissprot_seqs, all_curated_virus, headers=swissprot_headers,
     )
+
+    # Step 5: Build datasets based on forget task
+    # Append output dir with task name for clarity
+    output_dir = os.path.join(args.data_dir, args.forget_task)
+
+    if args.forget_task == "coarse":
+        # Forget = all viral (curated + Swiss-Prot detected)
+        all_viral = human_seqs + nonhuman_seqs + viral_swissprot
+        prepare_coarse(all_viral, retain_seqs, output_dir, rng)
+
+    elif args.forget_task == "fine":
+        # Forget = human-infecting, adjacent = non-human curated + Swiss-Prot viral
+        adjacent_seqs = nonhuman_seqs + viral_swissprot
+        prepare_fine(
+            human_seqs, adjacent_seqs, retain_seqs, output_dir, rng,
+            forget_description="Human-infecting viral proteins (species-level annotation)",
+            adjacent_description="Non-human viral (curated) + Swiss-Prot viral (header-detected)",
+        )
+
+    elif args.forget_task == "custom":
+        if not args.forget_tsv:
+            parser.error("--forget-tsv required for --forget-task custom")
+        custom_seqs = [s for s in load_tsv_sequences(args.forget_tsv) if is_valid_sequence(s)]
+        custom_set = set(custom_seqs)
+
+        # Adjacent = all viral NOT in the custom forget set
+        adjacent_seqs = [s for s in (human_seqs + nonhuman_seqs + viral_swissprot)
+                         if s not in custom_set]
+        prepare_fine(
+            custom_seqs, adjacent_seqs, retain_seqs, output_dir, rng,
+            forget_description=f"Custom forget set from {args.forget_tsv}",
+            adjacent_description="Remaining viral proteins not in forget set",
+        )
+
+    print(f"\nDone. Data saved to {output_dir}")
+    print(f"Use --data-dir {output_dir} when running training/eval scripts.")
 
 
 if __name__ == "__main__":

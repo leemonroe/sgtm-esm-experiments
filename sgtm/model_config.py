@@ -25,6 +25,13 @@ class ESM2Config:
 
 
 # Registry of supported model sizes
+#
+# Forget allocation targets ~5% of attention (1/20 heads) and ~3% of MLP,
+# matching the original SGTM paper's ~3.1% allocation.
+# Phase 1 used much larger allocations (10-15% attn, 12.5% MLP) which
+# may have contributed to the catastrophic ablation results.
+#
+# Override at the command line with --forget-heads and --forget-mlp-start.
 MODEL_CONFIGS = {
     "8M": ESM2Config(
         name="8M",
@@ -34,8 +41,8 @@ MODEL_CONFIGS = {
         attention_heads=20,
         head_dim=16,
         mlp_dim=1280,
-        default_forget_heads=[17, 18, 19],
-        default_forget_mlp_start=1120,
+        default_forget_heads=[19],          # 1/20 heads = 5%
+        default_forget_mlp_start=1240,      # 40/1280 MLP dims = 3.1%
     ),
     "35M": ESM2Config(
         name="35M",
@@ -45,8 +52,8 @@ MODEL_CONFIGS = {
         attention_heads=20,
         head_dim=24,
         mlp_dim=1920,
-        default_forget_heads=[18, 19],
-        default_forget_mlp_start=1680,
+        default_forget_heads=[19],          # 1/20 heads = 5%
+        default_forget_mlp_start=1860,      # 60/1920 MLP dims = 3.1%
     ),
 }
 

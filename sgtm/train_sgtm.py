@@ -14,6 +14,7 @@ Usage:
 
 import argparse
 import json
+import math
 import os
 import random
 import sys
@@ -119,14 +120,15 @@ def build_data_split_order(
     Build a shuffled list of data source labels, one per training step.
 
     Upsampling factors ensure viral proteins appear frequently despite being
-    a tiny fraction of the corpus.
+    a tiny fraction of the corpus. Labels map to SGTM modes in the training loop:
+      "forget" -> forget mode, "adjacent" -> default mode, "retain" -> retain mode.
     """
     order = (
         ["forget"] * int(n_forget * upsample_forget)
         + ["adjacent"] * int(n_adjacent * upsample_adjacent)
-        + ["default"] * n_ambiguous   # ambiguous -> "default" (all params update)
         + ["retain"] * n_retain
     )
+    # n_ambiguous kept in signature for backward compat but no longer used
     rng = random.Random(seed)
     rng.shuffle(order)
 
@@ -280,35 +282,40 @@ def main():
     print("\nLoading datasets...")
     collator = MLMCollator(alphabet, mask_ratio=args.mask_ratio, max_length=args.max_length)
 
+    # Discover available categories from the data directory
+    # Supports both coarse (forget/retain) and fine (forget/adjacent/retain)
+    has_adjacent = os.path.isdir(os.path.join(args.data_dir, "adjacent", "train"))
+
     forget_train = load_from_disk(os.path.join(args.data_dir, "forget", "train"))
-    adjacent_train = load_from_disk(os.path.join(args.data_dir, "adjacent", "train"))
-    ambiguous = load_from_disk(os.path.join(args.data_dir, "ambiguous"))
     retain_train = load_from_disk(os.path.join(args.data_dir, "retain", "train"))
 
     forget_val = load_from_disk(os.path.join(args.data_dir, "forget", "val"))
-    adjacent_val = load_from_disk(os.path.join(args.data_dir, "adjacent", "val"))
     retain_val = load_from_disk(os.path.join(args.data_dir, "retain", "val"))
 
     print(f"  forget:    {len(forget_train)} train / {len(forget_val)} val")
-    print(f"  adjacent:  {len(adjacent_train)} train / {len(adjacent_val)} val")
-    print(f"  ambiguous: {len(ambiguous)} (default)")
+
+    adjacent_train, adjacent_val = None, None
+    if has_adjacent:
+        adjacent_train = load_from_disk(os.path.join(args.data_dir, "adjacent", "train"))
+        adjacent_val = load_from_disk(os.path.join(args.data_dir, "adjacent", "val"))
+        print(f"  adjacent:  {len(adjacent_train)} train / {len(adjacent_val)} val")
+    else:
+        print(f"  adjacent:  (not present)")
+
     print(f"  retain:    {len(retain_train)} train / {len(retain_val)} val")
 
     # Build training data loaders
     if args.mode == "holdout":
-        # No forget data at all
-        train_datasets = {
-            "adjacent": adjacent_train,
-            "default": ambiguous,
-            "retain": retain_train,
-        }
+        train_datasets = {"retain": retain_train}
+        if has_adjacent:
+            train_datasets["adjacent"] = adjacent_train
     else:
         train_datasets = {
             "forget": forget_train,
-            "adjacent": adjacent_train,
-            "default": ambiguous,
             "retain": retain_train,
         }
+        if has_adjacent:
+            train_datasets["adjacent"] = adjacent_train
 
     pin = args.device != "cpu"
     train_loader = MultiDataLoader(
@@ -317,41 +324,45 @@ def main():
         num_workers=args.num_workers, pin_memory=pin,
     )
 
-    # Validation loaders (standard, no multi-dataset)
+    # Validation loaders
     val_loaders = {
         "forget": DataLoader(forget_val, batch_size=args.batch_size,
                              collate_fn=collator, shuffle=False,
                              num_workers=args.num_workers, pin_memory=pin),
-        "adjacent": DataLoader(adjacent_val, batch_size=args.batch_size,
-                               collate_fn=collator, shuffle=False,
-                               num_workers=args.num_workers, pin_memory=pin),
         "retain": DataLoader(retain_val, batch_size=args.batch_size,
                              collate_fn=collator, shuffle=False,
                              num_workers=args.num_workers, pin_memory=pin),
     }
+    if has_adjacent:
+        val_loaders["adjacent"] = DataLoader(
+            adjacent_val, batch_size=args.batch_size,
+            collate_fn=collator, shuffle=False,
+            num_workers=args.num_workers, pin_memory=pin,
+        )
 
     # ------------------------------------------------------------------
     # data_split_order
     # ------------------------------------------------------------------
+    n_adjacent = len(adjacent_train) if has_adjacent else 0
     if args.mode == "holdout":
         data_split_order = build_data_split_order(
             n_forget=0,
-            n_adjacent=len(adjacent_train),
-            n_ambiguous=len(ambiguous),
+            n_adjacent=n_adjacent,
+            n_ambiguous=0,
             n_retain=len(retain_train),
             upsample_forget=0,
-            upsample_adjacent=args.upsample_adjacent,
+            upsample_adjacent=args.upsample_adjacent if has_adjacent else 0,
             total_steps=args.max_steps,
             seed=args.seed,
         )
     else:
         data_split_order = build_data_split_order(
             n_forget=len(forget_train),
-            n_adjacent=len(adjacent_train),
-            n_ambiguous=len(ambiguous),
+            n_adjacent=n_adjacent,
+            n_ambiguous=0,
             n_retain=len(retain_train),
             upsample_forget=args.upsample_forget,
-            upsample_adjacent=args.upsample_adjacent,
+            upsample_adjacent=args.upsample_adjacent if has_adjacent else 0,
             total_steps=args.max_steps,
             seed=args.seed,
         )
@@ -471,18 +482,51 @@ def main():
             val_results = {}
             for name, loader in val_loaders.items():
                 val_results[name] = evaluate(model, loader, args.device)
-            tqdm.write(
-                f"  [eval] forget={val_results['forget']:.4f} "
-                f"adjacent={val_results['adjacent']:.4f} "
-                f"retain={val_results['retain']:.4f}"
+            eval_msg = "  [eval] " + " ".join(
+                f"{k}={v:.4f}" for k, v in val_results.items()
             )
+            tqdm.write(eval_msg)
+
+            # PPL for wandb charts (capped at exp(20) to avoid overflow; raw loss is the authoritative metric)
+            val_ppl = {k: math.exp(min(v, 20)) for k, v in val_results.items()}
+
             history["val_losses"].append({"step": step + 1, **val_results})
             if use_wandb:
-                wandb.log({
-                    "val/forget_loss": val_results["forget"],
-                    "val/adjacent_loss": val_results["adjacent"],
-                    "val/retain_loss": val_results["retain"],
-                }, step=step + 1)
+                log_dict = {}
+                for k, v in val_results.items():
+                    log_dict[f"val/{k}_loss"] = v
+                    log_dict[f"val/{k}_ppl"] = val_ppl[k]
+                wandb.log(log_dict, step=step + 1)
+
+            # Ablate-eval-restore: evaluate post-ablation model (SGTM only)
+            if args.mode == "sgtm" and forget_mask is not None:
+                saved_state = {k: v.clone() for k, v in model.state_dict().items()}
+                ablate(model, forget_mask)
+
+                abl_results = {}
+                for name, loader in val_loaders.items():
+                    abl_results[name] = evaluate(model, loader, args.device)
+                # PPL capped for display; raw loss saved to history and wandb as _loss metrics
+                abl_ppl = {k: math.exp(min(v, 20)) for k, v in abl_results.items()}
+
+                abl_msg = "  [ablated] " + " ".join(
+                    f"{k}={v:.4f} (ppl {abl_ppl[k]:.1f})" for k, v in abl_results.items()
+                )
+                tqdm.write(abl_msg)
+
+                history["val_losses"][-1].update({
+                    f"ablated_{k}": v for k, v in abl_results.items()
+                })
+                if use_wandb:
+                    abl_log = {}
+                    for k, v in abl_results.items():
+                        abl_log[f"val_ablated/{k}_loss"] = v
+                        abl_log[f"val_ablated/{k}_ppl"] = abl_ppl[k]
+                    wandb.log(abl_log, step=step + 1)
+
+                # Restore original weights
+                model.load_state_dict(saved_state)
+                model.train()
 
             # Save best by retain val loss
             if val_results["retain"] < best_val_loss:

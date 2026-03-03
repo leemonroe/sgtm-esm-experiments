@@ -39,48 +39,59 @@ except ImportError:
     HAS_WANDB = False
 
 
-def load_virus_sequences(raw_dir="data/raw"):
-    """Load human and non-human viral sequences from TSV files."""
+def load_virus_sequences(data_dir="data/sgtm"):
+    """Load human-infecting vs non-human viral sequences from held-out val splits.
+
+    Only works for the fine-grained task (requires both forget and adjacent splits).
+    Returns None, None if adjacent split doesn't exist (coarse task).
+    """
+    from datasets import load_from_disk
+
+    adjacent_path = os.path.join(data_dir, "adjacent", "val")
+    if not os.path.isdir(adjacent_path):
+        return None, None
+
     sequences = []
     labels = []
 
-    for fname, label in [("virus_human.tsv", 1), ("virus_nonhuman.tsv", 0)]:
-        path = os.path.join(raw_dir, fname)
-        with open(path) as f:
-            f.readline()  # skip header
-            for line in f:
-                parts = line.strip().split("\t")
-                if len(parts) >= 4:
-                    sequences.append(parts[3])
-                    labels.append(label)
+    forget_val = load_from_disk(os.path.join(data_dir, "forget", "val"))
+    for row in forget_val:
+        sequences.append(row["sequence"])
+        labels.append(1)
+
+    adjacent_val = load_from_disk(adjacent_path)
+    for row in adjacent_val:
+        sequences.append(row["sequence"])
+        labels.append(0)
 
     return sequences, labels
 
 
-def load_viral_vs_nonviral(raw_dir="data/raw", n_nonviral=500, seed=42):
+def load_viral_vs_nonviral(data_dir="data/sgtm", seed=42):
     """Load balanced viral vs non-viral sequences for Task 2.
 
-    Uses the virus TSV files for viral, and a sample of Swiss-Prot
-    retain sequences (from data/sgtm/retain/test) for non-viral.
+    Works for both coarse and fine tasks. Viral = forget + adjacent (if present).
     """
     from datasets import load_from_disk
 
-    # Viral sequences
+    # Viral from val splits
     viral_seqs = []
-    for fname in ("virus_human.tsv", "virus_nonhuman.tsv"):
-        path = os.path.join(raw_dir, fname)
-        with open(path) as f:
-            f.readline()
-            for line in f:
-                parts = line.strip().split("\t")
-                if len(parts) >= 4:
-                    viral_seqs.append(parts[3])
+    for split in ("forget", "adjacent"):
+        split_path = os.path.join(data_dir, split, "val")
+        if os.path.isdir(split_path):
+            ds = load_from_disk(split_path)
+            for row in ds:
+                viral_seqs.append(row["sequence"])
 
-    # Non-viral from retain test set
-    retain_test = load_from_disk("data/sgtm/retain/test")
+    if not viral_seqs:
+        return None, None
+
+    # Non-viral from retain val
+    retain_val = load_from_disk(os.path.join(data_dir, "retain", "val"))
     rng = np.random.RandomState(seed)
-    indices = rng.choice(len(retain_test), size=min(n_nonviral, len(retain_test)), replace=False)
-    nonviral_seqs = [retain_test[int(i)]["sequence"] for i in indices]
+    n_nonviral = len(viral_seqs)  # balance classes
+    indices = rng.choice(len(retain_val), size=min(n_nonviral, len(retain_val)), replace=False)
+    nonviral_seqs = [retain_val[int(i)]["sequence"] for i in indices]
 
     sequences = viral_seqs + nonviral_seqs
     labels = [1] * len(viral_seqs) + [0] * len(nonviral_seqs)
@@ -113,9 +124,9 @@ def extract_embeddings(model, alphabet, sequences, device, batch_size=8):
 
 
 def logreg_cv(embeddings, labels, cv=5):
-    """Logistic regression with cross-validation."""
+    """Logistic regression with cross-validation using balanced accuracy."""
     lr = LogisticRegression(max_iter=1000)
-    scores = cross_val_score(lr, embeddings, labels, cv=cv)
+    scores = cross_val_score(lr, embeddings, labels, cv=cv, scoring='balanced_accuracy')
     return float(scores.mean()), float(scores.std())
 
 
@@ -123,7 +134,7 @@ def main():
     parser = argparse.ArgumentParser(description="Linear probe evaluation for SGTM")
     parser.add_argument("--model-size", type=str, default="8M")
     parser.add_argument("--models-dir", default="models/sgtm")
-    parser.add_argument("--raw-dir", default="data/raw")
+    parser.add_argument("--data-dir", default="data/sgtm")
     parser.add_argument("--output-dir", default="results/sgtm")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--batch-size", type=int, default=8)
@@ -150,12 +161,18 @@ def main():
 
     # Load evaluation data
     print("Loading Task 1: human-infecting vs non-human viral...")
-    task1_seqs, task1_labels = load_virus_sequences(args.raw_dir)
-    print(f"  {sum(task1_labels)} human-infecting, {len(task1_labels) - sum(task1_labels)} non-human")
+    task1_seqs, task1_labels = load_virus_sequences(args.data_dir)
+    if task1_seqs is None:
+        print("  Skipped — no adjacent split (coarse task?)")
+    else:
+        print(f"  {sum(task1_labels)} human-infecting, {len(task1_labels) - sum(task1_labels)} non-human")
 
     print("Loading Task 2: viral vs non-viral...")
-    task2_seqs, task2_labels = load_viral_vs_nonviral(args.raw_dir)
-    print(f"  {sum(task2_labels)} viral, {len(task2_labels) - sum(task2_labels)} non-viral")
+    task2_seqs, task2_labels = load_viral_vs_nonviral(args.data_dir)
+    if task2_seqs is None:
+        print("  Skipped — no viral sequences found")
+    else:
+        print(f"  {sum(task2_labels)} viral, {len(task2_labels) - sum(task2_labels)} non-viral")
 
     # Discover model conditions
     conditions = []
@@ -175,20 +192,22 @@ def main():
 
         model, _ = load_model_from_checkpoint(cfg, ckpt_path, args.device)
 
-        # Pre-ablation embeddings
-        emb1 = extract_embeddings(model, alphabet, task1_seqs, args.device, args.batch_size)
-        emb2 = extract_embeddings(model, alphabet, task2_seqs, args.device, args.batch_size)
+        # Pre-ablation embeddings & probes
+        cond_results = {}
 
-        t1_acc, t1_std = logreg_cv(emb1, task1_labels)
-        t2_acc, t2_std = logreg_cv(emb2, task2_labels)
+        if task1_seqs is not None:
+            emb1 = extract_embeddings(model, alphabet, task1_seqs, args.device, args.batch_size)
+            t1_acc, t1_std = logreg_cv(emb1, task1_labels)
+            print(f"  Task 1 (human vs non-human): {t1_acc:.3f} +/- {t1_std:.3f}")
+            cond_results["task1_human_vs_nonhuman"] = {"mean": t1_acc, "std": t1_std}
 
-        print(f"  Task 1 (human vs non-human): {t1_acc:.3f} +/- {t1_std:.3f}")
-        print(f"  Task 2 (viral vs non-viral): {t2_acc:.3f} +/- {t2_std:.3f}")
+        if task2_seqs is not None:
+            emb2 = extract_embeddings(model, alphabet, task2_seqs, args.device, args.batch_size)
+            t2_acc, t2_std = logreg_cv(emb2, task2_labels)
+            print(f"  Task 2 (viral vs non-viral): {t2_acc:.3f} +/- {t2_std:.3f}")
+            cond_results["task2_viral_vs_nonviral"] = {"mean": t2_acc, "std": t2_std}
 
-        all_results[cond_name] = {
-            "task1_human_vs_nonhuman": {"mean": t1_acc, "std": t1_std},
-            "task2_viral_vs_nonviral": {"mean": t2_acc, "std": t2_std},
-        }
+        all_results[cond_name] = cond_results
 
         # For SGTM runs: also evaluate post-ablation
         if cond_name.startswith("sgtm"):
@@ -205,31 +224,44 @@ def main():
 
             ablate(model, forget_mask)
 
-            emb1_abl = extract_embeddings(model, alphabet, task1_seqs, args.device, args.batch_size)
-            emb2_abl = extract_embeddings(model, alphabet, task2_seqs, args.device, args.batch_size)
-
-            t1_acc_abl, t1_std_abl = logreg_cv(emb1_abl, task1_labels)
-            t2_acc_abl, t2_std_abl = logreg_cv(emb2_abl, task2_labels)
-
             abl_name = f"{cond_name}_ablated"
+            abl_results = {}
             print(f"\n  [post-ablation]")
-            print(f"  Task 1: {t1_acc_abl:.3f} +/- {t1_std_abl:.3f}")
-            print(f"  Task 2: {t2_acc_abl:.3f} +/- {t2_std_abl:.3f}")
 
-            all_results[abl_name] = {
-                "task1_human_vs_nonhuman": {"mean": t1_acc_abl, "std": t1_std_abl},
-                "task2_viral_vs_nonviral": {"mean": t2_acc_abl, "std": t2_std_abl},
-            }
+            if task1_seqs is not None:
+                emb1_abl = extract_embeddings(model, alphabet, task1_seqs, args.device, args.batch_size)
+                t1_acc_abl, t1_std_abl = logreg_cv(emb1_abl, task1_labels)
+                print(f"  Task 1: {t1_acc_abl:.3f} +/- {t1_std_abl:.3f}")
+                abl_results["task1_human_vs_nonhuman"] = {"mean": t1_acc_abl, "std": t1_std_abl}
+
+            if task2_seqs is not None:
+                emb2_abl = extract_embeddings(model, alphabet, task2_seqs, args.device, args.batch_size)
+                t2_acc_abl, t2_std_abl = logreg_cv(emb2_abl, task2_labels)
+                print(f"  Task 2: {t2_acc_abl:.3f} +/- {t2_std_abl:.3f}")
+                abl_results["task2_viral_vs_nonviral"] = {"mean": t2_acc_abl, "std": t2_std_abl}
+
+            all_results[abl_name] = abl_results
 
     # Summary
-    print(f"\n{'=' * 70}")
-    print(f"{'Condition':<30} {'Task1 (h vs nh)':>16} {'Task2 (v vs nv)':>16}")
-    print(f"{'-' * 70}")
+    task_names = []
+    if task1_seqs is not None:
+        task_names.append(("task1_human_vs_nonhuman", "Task1 (h vs nh)"))
+    if task2_seqs is not None:
+        task_names.append(("task2_viral_vs_nonviral", "Task2 (v vs nv)"))
+
+    header = f"{'Condition':<30}" + "".join(f" {label:>16}" for _, label in task_names)
+    print(f"\n{'=' * len(header)}")
+    print(header)
+    print(f"{'-' * len(header)}")
     for name, r in all_results.items():
-        t1 = r["task1_human_vs_nonhuman"]
-        t2 = r["task2_viral_vs_nonviral"]
-        print(f"{name:<30} {t1['mean']:.3f}±{t1['std']:.3f}    {t2['mean']:.3f}±{t2['std']:.3f}")
-    print(f"{'=' * 70}")
+        row = f"{name:<30}"
+        for key, _ in task_names:
+            if key in r:
+                row += f" {r[key]['mean']:.3f}±{r[key]['std']:.3f}    "
+            else:
+                row += f" {'N/A':>16}"
+        print(row)
+    print(f"{'=' * len(header)}")
 
     # Save
     out_path = os.path.join(args.output_dir, "linear_probe_results.json")

@@ -16,12 +16,25 @@
 !sgtm/visualize_results.py
 !sgtm/results_35m.md
 !sgtm/bioriskeval_mut.py
+!sgtm/convert_to_hf.py
+!sgtm/methods_phase1.md
+!sgtm/methods_phase2.md
+!sgtm/recovery_finetune.py
+!sgtm/phase2_research_log.md
+!sgtm/midpoint_report.md
+!sgtm/methods_section.md
+
+# Scripts
+!scripts/
+!scripts/setup_pod.sh
+!scripts/train_phase2.sh
 
 # Raw virus data (needed for data pipeline)
 !data/
 !data/raw/
 !data/raw/virus_human.tsv
 !data/raw/virus_nonhuman.tsv
+!data/download_virus_data.py
 
 # Setup script
 !setup.sh

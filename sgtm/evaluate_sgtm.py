@@ -76,10 +76,12 @@ def evaluate_model(model, test_loaders, device):
     return results
 
 
-def plot_perplexity_comparison(all_results, output_path):
+def plot_perplexity_comparison(all_results, output_path, splits=None):
     """Bar chart comparing perplexity across models and data splits."""
     model_names = list(all_results.keys())
-    splits = ["forget", "adjacent", "retain"]
+    if splits is None:
+        # Collect all splits present in any result
+        splits = list(dict.fromkeys(s for r in all_results.values() for s in r))
     x = np.arange(len(splits))
     width = 0.8 / len(model_names)
 
@@ -106,9 +108,10 @@ def plot_perplexity_comparison(all_results, output_path):
     print(f"Saved perplexity comparison: {output_path}")
 
 
-def plot_ablation_comparison(pre_ablation, post_ablation, output_path):
+def plot_ablation_comparison(pre_ablation, post_ablation, output_path, splits=None):
     """Before/after ablation comparison for SGTM model."""
-    splits = ["forget", "adjacent", "retain"]
+    if splits is None:
+        splits = [s for s in pre_ablation if s in post_ablation]
     x = np.arange(len(splits))
     width = 0.35
 
@@ -206,14 +209,20 @@ def main():
         )
 
     # Load test sets
+    # Use a seeded collator so masking is deterministic — pre- and post-ablation
+    # evals get identical masked positions regardless of global RNG state.
     print(f"Loading test datasets (model: ESM-2 {cfg.name})...")
     alphabet = load_alphabet()
-    collator = MLMCollator(alphabet, mask_ratio=0.15, max_length=args.max_length)
+    collator = MLMCollator(alphabet, mask_ratio=0.15, max_length=args.max_length, seed=42)
     pin = args.device != "cpu"
 
     test_loaders = {}
     for split in ("forget", "adjacent", "retain"):
-        ds = load_from_disk(os.path.join(args.data_dir, split, "test"))
+        split_path = os.path.join(args.data_dir, split, "test")
+        if not os.path.isdir(split_path):
+            print(f"  {split}: not present (skipping)")
+            continue
+        ds = load_from_disk(split_path)
         test_loaders[split] = DataLoader(
             ds, batch_size=args.batch_size, collate_fn=collator, shuffle=False,
             num_workers=args.num_workers, pin_memory=pin,
@@ -236,8 +245,10 @@ def main():
     all_results = {}
 
     for run_name in run_names:
-        # Seed for reproducible masking across models
-        torch.manual_seed(42)
+        # Reset collator RNG so each model gets the same masking pattern.
+        # The dedicated Generator inside the collator isolates eval masking
+        # from the global torch RNG state — no more fragile global seed resets.
+        collator.rng.manual_seed(42)
 
         ckpt_path = os.path.join(args.models_dir, run_name, "final_model.pt")
         if not os.path.exists(ckpt_path):
@@ -252,9 +263,8 @@ def main():
         results = evaluate_model(model, test_loaders, args.device)
         all_results[run_name] = results
 
-        print(f"  forget PPL:   {results['forget']:.2f}")
-        print(f"  adjacent PPL: {results['adjacent']:.2f}")
-        print(f"  retain PPL:   {results['retain']:.2f}")
+        for split_name in test_loaders:
+            print(f"  {split_name} PPL: {results[split_name]:.2f}")
 
         # For SGTM runs: also evaluate after ablation
         if run_name.startswith("sgtm"):
@@ -274,28 +284,51 @@ def main():
                 )
 
             ablate(model, forget_mask)
-            # Reset seed so ablation eval uses same MLM masks as pre-ablation
-            torch.manual_seed(42)
+            # Reset collator RNG so post-ablation uses same masks as pre-ablation
+            collator.rng.manual_seed(42)
             ablated_results = evaluate_model(model, test_loaders, args.device)
             all_results[f"{run_name}_ablated"] = ablated_results
 
             print(f"\n  [after ablation]")
-            print(f"  forget PPL:   {ablated_results['forget']:.2f}")
-            print(f"  adjacent PPL: {ablated_results['adjacent']:.2f}")
-            print(f"  retain PPL:   {ablated_results['retain']:.2f}")
+            for split_name in test_loaders:
+                print(f"  {split_name} PPL: {ablated_results[split_name]:.2f}")
 
     # Print summary table
-    print(f"\n{'='*60}")
-    print(f"{'Model':<20} {'Forget PPL':>12} {'Adjacent PPL':>14} {'Retain PPL':>12}")
-    print(f"{'-'*60}")
+    split_names = list(test_loaders.keys())
+    header = f"{'Model':<20}" + "".join(f" {s+' PPL':>14}" for s in split_names)
+    print(f"\n{'='*len(header)}")
+    print(header)
+    print(f"{'-'*len(header)}")
     for name, results in all_results.items():
-        print(f"{name:<20} {results['forget']:>12.2f} {results['adjacent']:>14.2f} {results['retain']:>12.2f}")
-    print(f"{'='*60}")
+        row = f"{name:<20}"
+        for s in split_names:
+            row += f" {results.get(s, float('nan')):>14.2f}"
+        print(row)
+    print(f"{'='*len(header)}")
 
-    # Save results
+    # Compute and store ablation ratios for cross-architecture comparison.
+    # Ablation ratio = PPL_post / PPL_pre (dimensionless, comparable across MLM/AR).
+    ablation_ratios = {}
+    for run_name in run_names:
+        ablated_key = f"{run_name}_ablated"
+        if run_name in all_results and ablated_key in all_results:
+            ratios = {}
+            for s in split_names:
+                pre = all_results[run_name].get(s)
+                post = all_results[ablated_key].get(s)
+                if pre and post and pre > 0:
+                    ratios[s] = post / pre
+            if ratios:
+                ablation_ratios[run_name] = ratios
+
+    # Save results (absolute PPL + ablation ratios)
+    output = {
+        "absolute_ppl": all_results,
+        "ablation_ratios": ablation_ratios,
+    }
     results_path = os.path.join(args.output_dir, "perplexity_results.json")
     with open(results_path, "w") as f:
-        json.dump(all_results, f, indent=2)
+        json.dump(output, f, indent=2)
     print(f"\nResults saved to {results_path}")
 
     # Log to wandb
@@ -303,6 +336,9 @@ def main():
         for name, results in all_results.items():
             for split, ppl in results.items():
                 wandb.log({f"ppl/{name}/{split}": ppl})
+        for name, ratios in ablation_ratios.items():
+            for split, ratio in ratios.items():
+                wandb.log({f"ablation_ratio/{name}/{split}": ratio})
         wandb.log({"all_results": all_results})
 
     # Plots
@@ -325,16 +361,15 @@ def main():
 
     # Success criteria check for each SGTM variant
     baseline_retain = all_results.get("baseline", {}).get("retain")
-    for run_name in run_names:
-        ablated_key = f"{run_name}_ablated"
-        if ablated_key in all_results and run_name in all_results:
-            forget_increase = all_results[ablated_key]["forget"] / all_results[run_name]["forget"]
-            print(f"\nSuccess metrics ({run_name}):")
-            print(f"  Forget PPL increase after ablation: {forget_increase:.2f}x")
-            if baseline_retain:
-                retain_ratio = all_results[ablated_key]["retain"] / baseline_retain
-                print(f"  Retain PPL ratio (ablated/baseline): {retain_ratio:.2f}x")
-            print(f"  Goal: forget increase >> 1, retain ratio ≈ 1")
+    for run_name, ratios in ablation_ratios.items():
+        print(f"\nSuccess metrics ({run_name}):")
+        print(f"  Ablation ratios (post/pre PPL — comparable across architectures):")
+        for s, ratio in ratios.items():
+            print(f"    {s}: {ratio:.2f}x")
+        if baseline_retain and "retain" in all_results.get(f"{run_name}_ablated", {}):
+            cross_retain = all_results[f"{run_name}_ablated"]["retain"] / baseline_retain
+            print(f"  Retain PPL ratio (ablated/baseline): {cross_retain:.2f}x")
+        print(f"  Goal: forget ratio >> 1, retain ratio ≈ 1")
 
     if use_wandb:
         wandb.finish()
