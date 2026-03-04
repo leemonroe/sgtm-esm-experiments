@@ -34,6 +34,9 @@ UPSAMPLE_FORGET=1
 UPSAMPLE_ADJACENT=1
 RETAIN_RETAIN_PERC=10
 ADJACENT_RETAIN_PERC=10
+# RTX 4090 (24GB): batch 4 × accum 32 = effective 128
+BATCH_SIZE=4
+GRAD_ACCUM=32
 
 mkdir -p "$OUTPUT_DIR" "$RESULTS_DIR"
 
@@ -53,6 +56,7 @@ if [[ "$STAGE" == "all" || "$STAGE" == "8m" ]]; then
     --run-name holdout-coarse-8m \
     --upsample-forget "$UPSAMPLE_FORGET" \
     --upsample-adjacent "$UPSAMPLE_ADJACENT" \
+    --batch-size "$BATCH_SIZE" --grad-accum "$GRAD_ACCUM" \
     --device cuda
 
   echo ""
@@ -70,6 +74,7 @@ if [[ "$STAGE" == "all" || "$STAGE" == "8m" ]]; then
     --retain-retain-perc "$RETAIN_RETAIN_PERC" \
     --adjacent-retain-perc "$ADJACENT_RETAIN_PERC" \
     --mask-embeddings \
+    --batch-size "$BATCH_SIZE" --grad-accum "$GRAD_ACCUM" \
     --device cuda
 fi
 
@@ -117,6 +122,7 @@ if [[ "$STAGE" == "all" || "$STAGE" == "35m" ]]; then
     --run-name holdout-coarse-35m \
     --upsample-forget "$UPSAMPLE_FORGET" \
     --upsample-adjacent "$UPSAMPLE_ADJACENT" \
+    --batch-size "$BATCH_SIZE" --grad-accum "$GRAD_ACCUM" \
     --device cuda
 
   echo ""
@@ -134,6 +140,7 @@ if [[ "$STAGE" == "all" || "$STAGE" == "35m" ]]; then
     --retain-retain-perc "$RETAIN_RETAIN_PERC" \
     --adjacent-retain-perc "$ADJACENT_RETAIN_PERC" \
     --mask-embeddings \
+    --batch-size "$BATCH_SIZE" --grad-accum "$GRAD_ACCUM" \
     --device cuda
 fi
 
