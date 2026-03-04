@@ -13,7 +13,7 @@ echo "=== Phase 2 Pod Setup ==="
 # 1. Install dependencies
 echo ""
 echo "--- Installing dependencies ---"
-pip install torch esm fair-esm transformers datasets scikit-learn matplotlib wandb h5py tqdm
+pip install torch fair-esm transformers datasets scikit-learn matplotlib wandb h5py tqdm
 
 # 2. Download curated virus data from UniProt (virus_hosts-based split)
 echo ""
