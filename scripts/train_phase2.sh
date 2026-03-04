@@ -24,10 +24,16 @@ DATA_DIR="data/sgtm/coarse"
 OUTPUT_DIR="models/sgtm_p2"
 RESULTS_DIR="results/sgtm_p2"
 
-# No upsampling — match the original SGTM paper (natural proportions).
-# Coarse forget set is ~4% of total data, similar to paper's 3.7%.
+# Match the original SGTM paper's training regime:
+# - No upsampling (natural proportions, ~4% forget similar to paper's 3.7%)
+# - 10% retain mode split (90% of retain/adjacent steps use default mode,
+#   so forget params get general training signal from most of the data)
+# - Embedding masking in forget mode (prevents forget data from updating
+#   shared token embeddings)
 UPSAMPLE_FORGET=1
 UPSAMPLE_ADJACENT=1
+RETAIN_RETAIN_PERC=10
+ADJACENT_RETAIN_PERC=10
 
 mkdir -p "$OUTPUT_DIR" "$RESULTS_DIR"
 
@@ -61,6 +67,9 @@ if [[ "$STAGE" == "all" || "$STAGE" == "8m" ]]; then
     --run-name sgtm-coarse-8m \
     --upsample-forget "$UPSAMPLE_FORGET" \
     --upsample-adjacent "$UPSAMPLE_ADJACENT" \
+    --retain-retain-perc "$RETAIN_RETAIN_PERC" \
+    --adjacent-retain-perc "$ADJACENT_RETAIN_PERC" \
+    --mask-embeddings \
     --device cuda
 fi
 
@@ -122,6 +131,9 @@ if [[ "$STAGE" == "all" || "$STAGE" == "35m" ]]; then
     --run-name sgtm-coarse-35m \
     --upsample-forget "$UPSAMPLE_FORGET" \
     --upsample-adjacent "$UPSAMPLE_ADJACENT" \
+    --retain-retain-perc "$RETAIN_RETAIN_PERC" \
+    --adjacent-retain-perc "$ADJACENT_RETAIN_PERC" \
+    --mask-embeddings \
     --device cuda
 fi
 

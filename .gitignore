@@ -29,11 +29,8 @@
 !scripts/setup_pod.sh
 !scripts/train_phase2.sh
 
-# Raw virus data (needed for data pipeline)
+# Data download script (data files pulled on the fly by pods)
 !data/
-!data/raw/
-!data/raw/virus_human.tsv
-!data/raw/virus_nonhuman.tsv
 !data/download_virus_data.py
 
 # Setup script

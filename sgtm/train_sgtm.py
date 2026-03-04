@@ -165,9 +165,9 @@ def main():
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=42)
 
-    # Upsampling
-    parser.add_argument("--upsample-forget", type=float, default=50)
-    parser.add_argument("--upsample-adjacent", type=float, default=150)
+    # Upsampling — default 1.0 (no upsampling) matches the original SGTM paper
+    parser.add_argument("--upsample-forget", type=float, default=1)
+    parser.add_argument("--upsample-adjacent", type=float, default=1)
 
     # SGTM configuration
     parser.add_argument("--forget-heads", type=str, default=None,
@@ -178,6 +178,20 @@ def main():
                         default="gradient_zeroing",
                         help="gradient_zeroing: zero grads post-backward; "
                              "gradient_routing: detach activations in forward pass")
+    parser.add_argument("--mask-embeddings", action="store_true", default=False,
+                        help="Zero embedding gradients in forget mode (matches SGTM paper)")
+
+    # Retain mode split — controls what fraction of each data source
+    # trains with retain mode vs default mode. The SGTM paper uses 10%
+    # for retain and adjacent data (90% default, 10% retain), meaning
+    # forget parameters still get gradient signal from most non-forget data.
+    parser.add_argument("--retain-retain-perc", type=float, default=10,
+                        help="Percent of retain-source steps that use retain mode (default: 10). "
+                             "Remainder uses default mode (all params update).")
+    parser.add_argument("--adjacent-retain-perc", type=float, default=10,
+                        help="Percent of adjacent-source steps that use retain mode (default: 10)")
+    parser.add_argument("--forget-retain-perc", type=float, default=0,
+                        help="Percent of forget-source steps that use retain mode (default: 0)")
 
     # Logging
     parser.add_argument("--log-interval", type=int, default=100)
@@ -369,10 +383,21 @@ def main():
 
     actual_steps = len(data_split_order)
     counts = Counter(data_split_order)
-    print(f"\nTraining for {actual_steps} steps:")
-    for label in ("forget", "adjacent", "default", "retain"):
+    print(f"\nTraining for {actual_steps} steps (data source schedule):")
+    for label in ("forget", "adjacent", "retain"):
         if counts[label]:
             print(f"  {label}: {counts[label]} ({counts[label]/actual_steps*100:.1f}%)")
+
+    if args.mode == "sgtm":
+        print(f"\nSGTM mode assignment (probabilistic):")
+        print(f"  retain-source steps: {args.retain_retain_perc:.0f}% retain mode, "
+              f"{100 - args.retain_retain_perc:.0f}% default mode")
+        if has_adjacent:
+            print(f"  adjacent-source steps: {args.adjacent_retain_perc:.0f}% retain mode, "
+                  f"{100 - args.adjacent_retain_perc:.0f}% default mode")
+        print(f"  forget-source steps: {args.forget_retain_perc:.0f}% retain mode, "
+              f"{100 - args.forget_retain_perc:.0f}% forget mode")
+        print(f"  Embedding masking in forget mode: {args.mask_embeddings}")
 
     # ------------------------------------------------------------------
     # Optimizer & scheduler
@@ -426,14 +451,28 @@ def main():
     for step in tqdm(range(start_step, actual_steps), desc=f"Training ({args.mode})", initial=start_step, total=actual_steps):
         source = data_split_order[step]
 
-        # Map source to SGTM mode
+        # Map source to SGTM mode, with probabilistic retain/default split
+        # matching the original SGTM paper's approach. E.g. with
+        # --retain-retain-perc 10, 90% of retain-source steps use default
+        # mode (all params update) and 10% use retain mode (forget params
+        # masked). This ensures forget params get general training signal.
         if args.mode == "sgtm":
+            rng_val = random.random()
             if source == "forget":
-                sgtm_mode = "forget"
+                if rng_val < args.forget_retain_perc / 100:
+                    sgtm_mode = "retain"
+                else:
+                    sgtm_mode = "forget"
             elif source == "retain":
-                sgtm_mode = "retain"
-            else:  # "adjacent" or "default"
-                sgtm_mode = "default"
+                if rng_val < args.retain_retain_perc / 100:
+                    sgtm_mode = "retain"
+                else:
+                    sgtm_mode = "default"
+            else:  # "adjacent"
+                if rng_val < args.adjacent_retain_perc / 100:
+                    sgtm_mode = "retain"
+                else:
+                    sgtm_mode = "default"
         else:
             sgtm_mode = None
 
@@ -454,6 +493,12 @@ def main():
             # Apply gradient zeroing after each micro-batch backward
             if sgtm_mode and retain_mask is not None and args.masking_strategy == "gradient_zeroing":
                 adjust_gradients(model, retain_mask, forget_mask, sgtm_mode)
+
+            # Zero embedding gradients in forget mode so forget data
+            # doesn't update the shared token representations
+            if sgtm_mode == "forget" and args.mask_embeddings:
+                if model.embed_tokens.weight.grad is not None:
+                    model.embed_tokens.weight.grad.zero_()
 
             accum_loss += loss.item()
 

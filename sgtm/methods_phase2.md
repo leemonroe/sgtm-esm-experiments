@@ -78,6 +78,38 @@ Same as Phase 1:
 - Forget and adjacent: 90/5/5 (train/val/test)
 - Retain: 95/2.5/2.5
 
+### Upsampling and Data Proportions                                                                                                                                          
+
+**Decision: no upsampling (match the original SGTM paper).**                                                                                                                 
+                                                        
+Phase 1 upsampled forget sequences 50× and adjacent sequences 150× to ensure the model encountered viral data frequently. This was calibrated for a 999-sequence forget set.
+With the coarse task's ~15,600 forget train sequences, the same 50× factor would produce ~780K forget entries vs ~383K retain — roughly 67% of training steps on forget data
+after truncation to 40K steps. This would starve the retain set and likely degrade general protein modeling.
+
+The original SGTM paper uses **no upsampling** (all upsample factors = 1.0). Their Wikipedia biology forget set was ~3.7% of total tokens, and training steps were allocated
+proportionally to natural dataset sizes. Our coarse task produces a similar natural ratio: ~15,600 forget / ~383,000 retain ≈ 4% forget steps. We match the paper's approach.
+
+**Tradeoff: natural proportions vs effective exposure.** The paper's 3.7% forget fraction was over a large corpus trained for many steps — each biology document was likely
+seen multiple times. Our ~15,600 forget train sequences at ~1,600 forget steps (4% of 40K) means each forget sequence is seen roughly once. If SGTM requires multiple
+exposures to localize knowledge into the forget partition, this could be insufficient. However, matching the paper's approach is the cleanest first experiment. If the coarse
+experiment fails, insufficient forget signal is a natural follow-up hypothesis that can be tested by adding controlled upsampling (e.g., 5× to reach ~17% forget steps).
+
+**Note on retain mode split.** The SGTM paper further splits retain data: 75% trains with `default` mode (all parameters update) and 25% with `retain` mode (forget
+parameters masked). Our implementation sends all retain data through `retain` mode. This is a stricter separation — retain parameters never receive gradients from forget
+data AND forget parameters never receive gradients from retain data. We note this as a deviation.
+
+### Class Balance for Evaluation
+
+The corrected linear probe evaluation (`sgtm/linear_probe.py`) addresses the Phase 1 class imbalance issues:
+
+- **Task 1 (human-infecting vs non-human viral):** Only applicable to the fine task. Uses val splits from forget and adjacent categories.
+- **Task 2 (viral vs non-viral):** Applicable to both tasks. Downsamples the majority class (retain) to match the minority class (forget, or forget + adjacent) before
+evaluation.
+- **Scoring:** Balanced accuracy (`sklearn.metrics.balanced_accuracy_score`) instead of standard accuracy, with 5-fold cross-validation.
+
+For the coarse task, Task 1 is not meaningful (no adjacent category). Task 2 becomes the primary probe evaluation.
+
+
 ## SGTM Implementation
 
 ### Parameter Partitioning and Gradient Masking
