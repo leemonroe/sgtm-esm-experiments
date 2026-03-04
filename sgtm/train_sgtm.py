@@ -489,18 +489,32 @@ def main():
             loss = compute_mlm_loss(model, batch, args.device)
             loss = loss / args.grad_accum
             loss.backward()
-
-            # Apply gradient zeroing after each micro-batch backward
-            if sgtm_mode and retain_mask is not None and args.masking_strategy == "gradient_zeroing":
-                adjust_gradients(model, retain_mask, forget_mask, sgtm_mode)
-
-            # Zero embedding gradients in forget mode so forget data
-            # doesn't update the shared token representations
-            if sgtm_mode == "forget" and args.mask_embeddings:
-                if model.embed_tokens.weight.grad is not None:
-                    model.embed_tokens.weight.grad.zero_()
-
             accum_loss += loss.item()
+
+        # Apply gradient masking ONCE after all microbatches have accumulated.
+        # Doing this inside the loop would zero gradients between microbatches,
+        # causing only the last microbatch's signal to survive on masked params.
+        if sgtm_mode and retain_mask is not None and args.masking_strategy == "gradient_zeroing":
+            adjust_gradients(model, retain_mask, forget_mask, sgtm_mode)
+
+        # Zero shared parameter gradients in forget mode so forget data
+        # doesn't update token embeddings or layer norms (matches paper)
+        if sgtm_mode == "forget" and args.mask_embeddings:
+            if model.embed_tokens.weight.grad is not None:
+                model.embed_tokens.weight.grad.zero_()
+            # Zero all layer norm gradients (shared params, per paper)
+            for layer in model.layers:
+                for ln in (layer.self_attn_layer_norm, layer.final_layer_norm):
+                    if ln.weight.grad is not None:
+                        ln.weight.grad.zero_()
+                    if ln.bias.grad is not None:
+                        ln.bias.grad.zero_()
+            # Post-encoder layer norm
+            if hasattr(model, "emb_layer_norm_after") and model.emb_layer_norm_after is not None:
+                if model.emb_layer_norm_after.weight.grad is not None:
+                    model.emb_layer_norm_after.weight.grad.zero_()
+                if model.emb_layer_norm_after.bias.grad is not None:
+                    model.emb_layer_norm_after.bias.grad.zero_()
 
         torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
         optimizer.step()
