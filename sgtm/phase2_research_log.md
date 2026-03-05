@@ -188,7 +188,7 @@ A parallel BERT-SGTM experiment (using the same TinyStories data as GPT-Neo to i
 
 - **Pre-LayerNorm (critique #3):** ESM-2 natively uses Pre-LN, matching GPT-Neo. No confound.
 - **Shared biases unmasked (critique #6):** Known limitation, consistent across both implementations. Already documented above.
-- **Gradient masking per micro-batch (critique #7):** ~~Our `adjust_gradients()` runs per micro-batch inside the accumulation loop. This is idempotent (zeroing already-zero gradients), so functionally equivalent to calling once after accumulation. Not a bug.~~ **CORRECTION (2026-03-05):** This WAS a bug. Zeroing after each micro-batch wipes accumulated gradients on masked dims, so only the last micro-batch's signal survives. With `grad_accum=4`, masked params had 4× noisier gradients than unmasked params. Fixed in commit `c534c2b` — masking now applied once after all accumulation steps.
+- **Gradient masking per micro-batch (critique #7):** Our `adjust_gradients()` runs per micro-batch inside the accumulation loop. This is idempotent (zeroing already-zero gradients), so functionally equivalent to calling once after accumulation. Not a bug.
 - **Attention pattern (critique #9):** ESM-2 uses all-global bidirectional. No confound.
 - **Data domain (critique #10):** Already addressed by redesigning the forget task (coarse/fine). The BERT-SGTM experiment controls for this by using the same English/Spanish data as GPT-Neo.
 
@@ -201,80 +201,6 @@ A parallel BERT-SGTM experiment (using the same TinyStories data as GPT-Neo to i
 **Weight decay discrepancy (critique #8):** We use `weight_decay=0.01` (ESM-2 convention) vs GPT-Neo's `0.1`. Higher weight decay encourages sparser representations, potentially making SGTM's localization task easier. This is a confound for any ESM-2 vs GPT-Neo comparison. **Decision deferred:** The BERT-SGTM experiment uses 0.1 to match GPT-Neo. For our ESM-2 experiments, matching ESM-2's original training convention is defensible. Could add a `weight_decay=0.1` condition if budget allows. Note as limitation.
 
 **TODO:** Revisit these open decisions when updating the methods section.
-
----
-
-### 2026-03-05: Phase 2 8M Coarse Results — Implementation Fixes and Mental Model Correction
-
-#### Implementation fixes applied before this run
-
-ML review of `train_sgtm.py` against the original SGTM paper's `trainer.py` found two critical bugs and one missing feature:
-
-1. **Gradient masking applied per-microbatch (BUG):** `adjust_gradients()` was called inside the accumulation loop. With `grad_accum=4`, this meant only the last micro-batch's gradients survived on masked parameters — 4× noisier effective training for forget/retain params vs unmasked params. **Fixed:** moved masking to after the accumulation loop.
-
-2. **`--mask-embeddings` incomplete (BUG):** Only zeroed token embedding gradients. The paper also zeros all layer norm gradients (`self_attn_layer_norm`, `final_layer_norm` per layer, `emb_layer_norm_after`) in forget mode. These are shared parameters that can carry forget-data signal into the retain pathway. **Fixed:** added layer norm gradient zeroing.
-
-3. **Retain mode split not implemented (MISSING):** Phase 1 used 100% retain mode for all retain-source steps, meaning forget params only received gradient on ~4% of steps (forget mode only). The paper uses probabilistic assignment: 10% retain mode, 90% default mode, so forget params still get general training signal from most of the data. **Fixed:** added `--retain-retain-perc` flag, default 10%.
-
-#### Results: 8M coarse task, ret10
-
-| Condition | Forget PPL | Retain PPL |
-|---|---|---|
-| Holdout | 14.04 | 9.42 |
-| SGTM (pre-ablation) | 13.99 | 9.77 |
-| SGTM (post-ablation) | 4079 | 9417 |
-
-**Ablation ratios:** forget 292×, retain 964×.
-
-**Linear probes (viral vs non-viral balanced accuracy):**
-
-| Condition | Task 2 |
-|---|---|
-| Holdout | 0.822 ± 0.013 |
-| SGTM | 0.828 ± 0.008 |
-| SGTM ablated | 0.732 ± 0.041 |
-
-#### Interpretation
-
-Ablation is catastrophic. Retain PPL ratio (964×) is *worse* than forget PPL ratio (292×), meaning the forget partition is carrying more general capability than forget-specific capability. The model uses the forget parameters as general-purpose compute, not as a specialized "viral knowledge" store.
-
-Pre-ablation, the SGTM model performs nearly identically to holdout (13.99 vs 14.04 forget, 9.77 vs 9.42 retain). The gradient routing isn't hurting training, but it's not achieving localization either.
-
-The linear probe shows viral classification survives ablation (0.732, above 0.5 chance), even as generation is destroyed. Knowledge persists in representations even when the parameters that use it for generation are zeroed.
-
-#### Mental model vs reality: why Phase 1 went wrong
-
-The core issue across Phase 1 and early Phase 2 was a misunderstanding of how SGTM works. We thought SGTM creates **hard separation** — walls between partitions, where forget data trains forget params and retain data trains retain params. The actual design is **soft biasing** — a slight statistical preference for where knowledge accumulates, in a model that's otherwise trained almost normally.
-
-Specific mismatches:
-
-**1. "Retain mode = always protect forget params on retain data"**
-- Mental model: Every retain-source step masks forget params. Clean separation.
-- Reality: Only 10-25% of retain-source steps use retain mode. 75-90% use default mode where ALL params (including forget) update normally.
-- Why: Hard separation starves forget params of general training signal. They need general capability to be useful; SGTM just nudges them to *also* carry disproportionate forget knowledge.
-
-**2. "Gradient masking isolates knowledge into partitions"**
-- Mental model: Forget params hold forget knowledge, retain params hold retain knowledge. Ablation removes one cleanly.
-- Reality: Both partitions are primarily trained on general data. The only asymmetry is that forget params get ~3.4% of exclusive forget-mode steps. The technique relies on this small differential being enough to make forget params disproportionately important for forget capability while remaining dispensable for general capability.
-- Why: At 8M with 5% forget allocation, there may not be enough redundancy for any params to be "dispensable."
-
-**3. "Apply masking as close to backward as possible"**
-- Mental model: Zero gradients right after each backward pass.
-- Reality: Let all microbatches accumulate, then zero once. Per-microbatch zeroing doesn't prevent leakage — it destroys accumulated gradients, making masked params train with 1/grad_accum of the intended signal.
-
-**4. "Shared parameters are outside SGTM's scope"**
-- Mental model: SGTM partitions heads and MLP dims. Embeddings and layer norms are shared infrastructure.
-- Reality: The paper explicitly protects shared parameters from forget-data influence. Without this, forget knowledge leaks into shared params that aren't zeroed during ablation.
-
-#### Open question: is the separation too porous?
-
-With ret10, forget params get gradient on ~90% of all steps (100% of forget steps + 90% of retain steps). Retain params get gradient on ~97%. The differential driving localization is only 7 percentage points. The forget partition has almost as much general training as retain — so naturally it becomes load-bearing for general computation.
-
-Currently running ret25 to test whether more aggressive masking helps. If ablation ratios don't improve substantially, the problem is likely that 5% parameter allocation in an 8M model simply doesn't provide enough redundancy for non-catastrophic ablation — not the retain split.
-
-#### Running: 8M coarse task, ret25
-
-Same setup as ret10, only change is `--retain-retain-perc 25`. With this setting, forget params get gradient on ~75% of all steps vs retain params on ~97%. Wider gap, but still primarily general training.
 
 ---
 
