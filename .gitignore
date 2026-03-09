@@ -23,11 +23,13 @@
 !sgtm/phase2_research_log.md
 !sgtm/midpoint_report.md
 !sgtm/methods_section.md
+!sgtm/results_phase2_8m.md
 
 # Scripts
 !scripts/
 !scripts/setup_pod.sh
 !scripts/train_phase2.sh
+!scripts/train_family.sh
 !scripts/check_seqs.py
 
 # Data download script (data files pulled on the fly by pods)

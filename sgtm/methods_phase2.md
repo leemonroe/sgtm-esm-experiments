@@ -35,36 +35,66 @@ These defaults are defined in `sgtm/model_config.py` and can be overridden at th
 
 ## Data
 
-### Reproducible Download
+### Source Databases
 
-All data is generated via `data/download_virus_data.py` for curated viral datasets and `sgtm/data_pipeline.py` for the full pipeline (Swiss-Prot download, filtering, splitting). The pipeline is run as:
+All protein sequences come from two sources, used as-is with no manual inspection of individual entries:
+
+1. **Swiss-Prot** (UniProt/Swiss-Prot): UniProt's reviewed partition, downloaded as `uniprot_sprot.fasta.gz` from the UniProt FTP server (`ftp.uniprot.org`). Contains ~570K protein sequences across all organisms. Each FASTA header includes an `OS=` field identifying the source organism. We use this file in bulk — no entries are individually verified.
+
+2. **UniProt viral query** (UniProt REST API): A programmatic query (`taxonomy_id:10239 AND reviewed:true`) retrieving all reviewed entries classified under Viruses, with `virus_hosts` annotation fields. This provides the host-level metadata needed for the fine-grained forget task. Downloaded via `data/download_virus_data.py`.
+
+### Viral vs Non-Viral Classification
+
+The viral/non-viral boundary is defined entirely by UniProt's existing annotations — we do not independently verify whether sequences are correctly classified. Two automated methods are used:
+
+- **API-queried set:** The UniProt REST API query returns all entries under taxonomy ID 10239 (Viruses). These are split into human-infecting vs non-human-infecting based on whether `Homo sapiens [TaxID: 9606]` appears in the `virus_hosts` field. **Known limitation:** host annotation is at the virus *species* level, not strain level — all Influenza A proteins are tagged as human-infecting even if the specific strain (e.g., A/Duck/England/1/1956 H11N6) is avian-only.
+
+- **Swiss-Prot header keyword matching:** Additional viral proteins are identified by regex matching on the `OS=` organism field in Swiss-Prot FASTA headers. Keywords: "virus", "phage", "viridae", "viral", "virales" (case-insensitive). This is a heuristic — we have not validated its precision or recall against UniProt's taxonomic classification.
+
+For the coarse task, both sources are merged into a single "all viral" forget set. Sequences appearing in both sources are deduplicated by exact sequence match.
+
+### Sequence Filtering
+
+All sequences are filtered before splitting:
+
+| Filter | Criterion |
+|---|---|
+| Valid amino acids | Standard 20 AAs only (no X, U, B, Z, etc.) |
+| Minimum length | 30 residues |
+| Maximum length | 1,022 residues (ESM-2 context window minus special tokens) |
+| Deduplication | Exact sequence match (within and across categories) |
+
+### Reproducible Pipeline
+
+The full pipeline is run as:
 
 ```
+python data/download_virus_data.py --output-dir data/raw/
 python -m sgtm.data_pipeline --forget-task {coarse,fine,custom}
 ```
 
-Data is saved to `data/sgtm/{coarse,fine,custom}/` as HuggingFace datasets with a JSON manifest documenting the configuration.
+Data is saved to `data/sgtm/{coarse,fine,custom}/` as HuggingFace Arrow datasets with a JSON manifest documenting the configuration. Scripts: `data/download_virus_data.py` (curated viral download), `sgtm/data_pipeline.py` (Swiss-Prot download, filtering, splitting).
 
 ### Coarse Task (`--forget-task coarse`)
 
 A clean two-way split with no adjacent category:
 
-| Category | Source | SGTM Mode |
-|---|---|---|
-| **Forget** | All viral proteins (curated human + curated non-human + Swiss-Prot header-detected) | Forget |
-| **Retain** | Non-viral Swiss-Prot proteins | Retain |
+| Category | Description | Source | Count (train) |
+|---|---|---|---|
+| **Forget** | All viral proteins | Curated human-infecting + curated non-human + Swiss-Prot header-detected | ~14,384 |
+| **Retain** | Non-viral proteins | Swiss-Prot entries not matching viral keywords | ~424,428 |
 
-This is the primary experiment. If SGTM cannot separate "all viral" from "non-viral" — categories that are structurally distinct — then it cannot do anything useful on protein models.
+Forget fraction: ~3.4% of training steps (no upsampling). This is the primary experiment. If SGTM cannot separate "all viral" from "non-viral" — categories that are structurally distinct — then it cannot do anything useful on protein models.
 
 ### Fine Task (`--forget-task fine`)
 
 A three-way split matching the original SGTM paper's design:
 
-| Category | Source | SGTM Mode |
-|---|---|---|
-| **Forget** | Human-infecting viral proteins (curated, species-level annotation) | Forget |
-| **Adjacent** | Non-human viral (curated) + Swiss-Prot viral (header-detected) | Default |
-| **Retain** | Non-viral Swiss-Prot proteins | Retain |
+| Category | Description | Source | Count (train) |
+|---|---|---|---|
+| **Forget** | Human-infecting viral proteins | Curated viral proteins from species with human hosts (TaxID 9606) | ~1,100 |
+| **Adjacent** | Other viral proteins | Curated non-human viral + Swiss-Prot header-detected viral | ~13,300 |
+| **Retain** | Non-viral proteins | Swiss-Prot entries not matching viral keywords | ~424,428 |
 
 This merges Phase 1's "adjacent" and "ambiguous" categories into a single "adjacent" category, eliminating the redundant four-way split. The fine task is harder and closer to the real biosecurity use case, but may require larger models.
 
@@ -94,9 +124,9 @@ seen multiple times. Our ~15,600 forget train sequences at ~1,600 forget steps (
 exposures to localize knowledge into the forget partition, this could be insufficient. However, matching the paper's approach is the cleanest first experiment. If the coarse
 experiment fails, insufficient forget signal is a natural follow-up hypothesis that can be tested by adding controlled upsampling (e.g., 5× to reach ~17% forget steps).
 
-**Note on retain mode split.** The SGTM paper further splits retain data: 75% trains with `default` mode (all parameters update) and 25% with `retain` mode (forget
-parameters masked). Our implementation sends all retain data through `retain` mode. This is a stricter separation — retain parameters never receive gradients from forget
-data AND forget parameters never receive gradients from retain data. We note this as a deviation.
+**Retain mode split.** The SGTM paper uses probabilistic mode assignment: on each retain-source step, a random draw determines whether to use `retain` mode (forget params masked) or `default` mode (all params update). The paper's primary experiments use 10% retain / 90% default for their 254M model and 25% retain / 75% default for their 8M model. This ensures forget parameters still receive general training signal from most of the data — without this, forget params are starved of gradient and become undertrained rather than specialized.
+
+Our implementation matches this with `--retain-retain-perc` (default 10%). Phase 1 used 100% retain mode (equivalent to `--retain-retain-perc 100`), which was a major confound — forget params only received gradient on ~4% of steps (forget mode only). Phase 2 tests both ret10 (matching the paper's 254M config) and ret25 (matching the paper's 8M config) to determine the sensitivity of this parameter.
 
 ### Class Balance for Evaluation
 
@@ -118,6 +148,18 @@ Same partitioning and masking approach as Phase 1 (see `methods_phase1.md` for f
 
 1. **Only attn+MLP condition** — no attention-only condition (matches the original paper).
 2. **1 head + small MLP slice** — ~5% attention + ~3% MLP, totaling ~4% of each layer's parameters (vs Phase 1's ~11–13%).
+3. **Gradient masking applied once after accumulation** — Phase 1 applied `adjust_gradients()` inside the micro-batch loop, meaning only the last micro-batch's gradients survived on masked parameters. With `grad_accum=4`, masked params had 4× noisier effective training than unmasked params. Phase 2 applies masking once after all micro-batches accumulate, matching the original paper's `trainer.py`.
+
+### Embedding and Layer Norm Masking
+
+When `--mask-embeddings` is set (default for all Phase 2 SGTM runs), the following gradients are zeroed in forget mode after each optimizer step, preventing forget data from updating shared parameters:
+
+- `embed_tokens.weight` — the token embedding matrix
+- `self_attn_layer_norm.weight` and `.bias` — per-layer attention layer norm
+- `final_layer_norm.weight` and `.bias` — per-layer FFN layer norm
+- `emb_layer_norm_after.weight` and `.bias` — post-encoder layer norm
+
+This matches the original paper's `--mask-embeddings` flag, which zeros both embeddings and all layer norms. ESM-2 has no position embeddings (it uses rotary), so only token embeddings are relevant.
 
 ### Gradient Masking Table
 
@@ -125,16 +167,18 @@ Same partitioning and masking approach as Phase 1 (see `methods_phase1.md` for f
 
 | Data Category | SGTM Mode | Gradient Behavior |
 |---|---|---|
-| Forget (all viral) | "forget" | Zero gradients on retain parameters |
-| Retain (non-viral) | "retain" | Zero gradients on forget parameters |
+| Forget (all viral) | "forget" (100% of forget steps) | Zero gradients on retain params; zero embedding + LN gradients |
+| Retain (non-viral) | "retain" (N%) or "default" (100-N%) | retain: zero gradients on forget params. default: all params update |
+
+Where N = `--retain-retain-perc` (10% or 25%, see conditions below).
 
 **Fine task (3-way):**
 
 | Data Category | SGTM Mode | Gradient Behavior |
 |---|---|---|
-| Forget (human-infecting) | "forget" | Zero gradients on retain parameters |
-| Adjacent (other viral) | "default" | No masking (all parameters update) |
-| Retain (non-viral) | "retain" | Zero gradients on forget parameters |
+| Forget (human-infecting) | "forget" (100%) | Zero gradients on retain params; zero embedding + LN gradients |
+| Adjacent (other viral) | "retain" (N%) or "default" (100-N%) | retain: zero forget grads. default: all params update |
+| Retain (non-viral) | "retain" (N%) or "default" (100-N%) | retain: zero forget grads. default: all params update |
 
 ### Ablation
 
@@ -144,10 +188,13 @@ Same as Phase 1: post-training zeroing of forget parameters, no rescaling.
 
 ### Primary: Coarse Task
 
-| Condition | Training Data | Gradient Masking |
-|---|---|---|
-| **Holdout** | Retain only (no viral data) | None |
-| **SGTM Attn+MLP** | Forget + Retain | Head [19] + MLP [1860:1920] (35M) or [1240:1280] (8M) |
+| Condition | Training Data | Gradient Masking | Retain Mode Split |
+|---|---|---|---|
+| **Holdout** | Retain only (no viral data) | None | N/A |
+| **SGTM ret10** | Forget + Retain | Head [19] + MLP [1240:1280] (8M) or [1860:1920] (35M) | 10% retain / 90% default |
+| **SGTM ret25** | Forget + Retain | Same as ret10 | 25% retain / 75% default |
+
+The ret10 condition matches the original paper's 254M configuration. The ret25 condition matches the paper's 8M TinyStories configuration and tests whether more aggressive masking of forget params during retain-source steps improves localization at small model sizes.
 
 ### Secondary: Fine Task
 
@@ -167,8 +214,8 @@ Same as Phase 1:
 | Weight decay | 0.01 |
 | LR schedule | Linear warmup (2,000 steps) + cosine decay |
 | Training steps | 40,000 |
-| Batch size (physical) | 32 |
-| Gradient accumulation | 4 (effective batch = 128) |
+| Batch size (physical) | 4 |
+| Gradient accumulation | 32 (effective batch = 128) |
 | Max gradient norm | 1.0 |
 | Sequence max length | 1,022 tokens |
 | MLM mask ratio | 15% |
@@ -274,11 +321,13 @@ Options:
 
 The following experiments are planned only if the primary coarse SGTM experiment succeeds (retain PPL preserved, forget PPL meaningfully increases after ablation).
 
-### Absorption Test
+### Label Noise Robustness Test
 
-The original SGTM paper highlights absorption as a key mechanism: ambiguous or borderline data, trained with `default` mode (all parameters update), gets absorbed into the retain pathway because retain parameters have greater capacity. The clean 2-way coarse experiment has no ambiguous data — every protein is unambiguously viral or non-viral — so it cannot demonstrate this effect.
+If the coarse experiment succeeds, we test SGTM's robustness to imperfect data labeling by randomly routing a fraction (10–20%) of the viral (forget) set through `default` mode instead of `forget` mode, simulating a classifier that misses some dangerous sequences.
 
-If the coarse experiment works, we test absorption by randomly routing a fraction of the viral (forget) set through `default` mode instead of `forget` mode. For example, hold out 10–20% of viral proteins and train them with all parameters updating. If absorption works, these proteins' knowledge should end up primarily in retain parameters, and ablation should still increase forget PPL on the held-out fraction. This tests whether SGTM can handle imperfect labels — a practical requirement for real deployment where the boundary between dangerous and benign knowledge is fuzzy.
+If the model is robust to this noise, ablation should still increase forget PPL on the mislabeled fraction — their knowledge should end up primarily in retain parameters because retain parameters have greater capacity and receive gradient from default-mode steps.
+
+**Note:** This tests label noise robustness, not "absorption" in the sense used by the SGTM paper. True absorption refers to genuinely ambiguous data that the model learns to route based on its content. Our test uses known-viral data with artificially randomized labels, which tests a different (but practically important) property: whether SGTM degrades gracefully when the forget/retain boundary is imperfect.
 
 ### Recovery Fine-Tuning (on SGTM-ablated model)
 

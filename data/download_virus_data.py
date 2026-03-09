@@ -1,18 +1,16 @@
 """
 Download viral protein data from UniProt for SGTM experiments.
 
-Produces two TSV files:
+Produces TSV files split by viral taxonomy:
   - virus_human.tsv: Reviewed viral proteins from species known to infect humans
   - virus_nonhuman.tsv: Reviewed viral proteins from species NOT known to infect humans
+  - virus_by_family.tsv: All reviewed viral proteins with family annotation
 
-The human/non-human split uses UniProt's "virus_host" annotation. Proteins from
-virus species that include Homo sapiens (TaxID: 9606) as a host are classified
-as human-infecting.
+The human/non-human split uses UniProt's "virus_host" annotation at the SPECIES
+level (not strain level) — see phase2_research_log.md for known limitations.
 
-NOTE on granularity: The host annotation is at the virus SPECIES level, not the
-strain level. For example, all Influenza A proteins are tagged as human-infecting
-even if the specific strain (e.g., A/Duck/England/1/1956 H11N6) is avian-only.
-This is a known limitation of the data — see phase2_research_log.md.
+The family split uses UniProt's "lineage" field, extracting the "(family)" level
+taxonomy. This enables family-based forget tasks (e.g., forget Coronaviridae).
 
 Usage:
   python data/download_virus_data.py                          # default output to data/raw/
@@ -31,8 +29,9 @@ import urllib.request
 # UniProt REST API (2022+ format)
 UNIPROT_SEARCH_URL = "https://rest.uniprot.org/uniprotkb/search"
 
-# Columns to retrieve (match the original TSV format)
-FIELDS = "accession,protein_name,organism_name,sequence,length,virus_hosts"
+# Columns to retrieve
+# lineage provides full taxonomy including family (e.g., "Coronaviridae (family)")
+FIELDS = "accession,protein_name,organism_name,sequence,length,virus_hosts,lineage"
 
 # Query for all reviewed viral proteins (Swiss-Prot, taxonomy: Viruses)
 VIRUS_QUERY = "(taxonomy_id:10239) AND (reviewed:true)"
@@ -104,6 +103,34 @@ def is_valid_sequence(seq, min_length=30, max_length=1022):
     )
 
 
+def extract_family(lineage_str):
+    """Extract the viral family name from a UniProt lineage string.
+
+    UniProt lineage fields look like:
+      "Riboviria, Orthornavirae, ..., Coronaviridae, Betacoronavirus, ..."
+    The family-level entry is tagged with "(family)" in some formats, or can
+    be identified as the entry ending in "-viridae" or "-idae".
+
+    Returns the family name or None if not found.
+    """
+    import re
+    if not lineage_str:
+        return None
+
+    # First try: look for explicit "(family)" annotation
+    match = re.search(r'(\w+)\s*\(family\)', lineage_str)
+    if match:
+        return match.group(1)
+
+    # Fallback: find entries ending in -viridae (standard viral family suffix)
+    for part in lineage_str.split(","):
+        part = part.strip()
+        if part.endswith("viridae"):
+            return part
+
+    return None
+
+
 def split_by_human_host(rows):
     """Split viral proteins into human-infecting and non-human based on virus_hosts field."""
     human = []
@@ -117,6 +144,30 @@ def split_by_human_host(rows):
             nonhuman.append(row)
 
     return human, nonhuman
+
+
+def split_by_family(rows, target_family):
+    """Split viral proteins by whether they belong to a specific viral family.
+
+    Args:
+        rows: List of row dicts with a "Lineage" field
+        target_family: Family name to match (e.g., "Coronaviridae")
+
+    Returns:
+        (target_rows, other_rows)
+    """
+    target = []
+    other = []
+
+    for row in rows:
+        lineage = row.get("Lineage", "")
+        family = extract_family(lineage)
+        if family and family.lower() == target_family.lower():
+            target.append(row)
+        else:
+            other.append(row)
+
+    return target, other
 
 
 def write_tsv(rows, output_path, fieldnames):
@@ -135,6 +186,8 @@ def main():
                         help="Minimum sequence length")
     parser.add_argument("--max-length", type=int, default=1022,
                         help="Maximum sequence length")
+    parser.add_argument("--list-families", action="store_true",
+                        help="Print family distribution and exit")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -156,16 +209,35 @@ def main():
     n_filtered = len(rows) - len(valid_rows)
     print(f"After filtering (length {args.min_length}-{args.max_length}, standard AAs): {len(valid_rows)} ({n_filtered} removed)")
 
+    # Step 2.5: Extract family annotations
+    from collections import Counter
+    family_counts = Counter()
+    no_family = 0
+    for row in valid_rows:
+        family = extract_family(row.get("Lineage", ""))
+        if family:
+            family_counts[family] += 1
+        else:
+            no_family += 1
+
+    print(f"\nFamily annotation coverage: {sum(family_counts.values())}/{len(valid_rows)} "
+          f"({no_family} without family)")
+
+    if args.list_families:
+        print(f"\n--- Top 30 viral families by sequence count ---")
+        for family, count in family_counts.most_common(30):
+            print(f"  {family}: {count}")
+        return
+
     # Step 3: Split by human host
     human, nonhuman = split_by_human_host(valid_rows)
     print(f"\nHuman-infecting (Virus hosts contains TaxID {HUMAN_TAXID}): {len(human)}")
     print(f"Non-human viral: {len(nonhuman)}")
 
     # Step 4: Write output files
-    # Use column names matching the original TSV format
-    fieldnames = ["Entry", "Protein names", "Organism", "Sequence", "Length", "Virus hosts"]
+    fieldnames = ["Entry", "Protein names", "Organism", "Sequence", "Length",
+                  "Virus hosts", "Lineage", "Family"]
 
-    # Map UniProt API field names to our TSV column names
     def remap_row(row):
         return {
             "Entry": row.get("Entry", ""),
@@ -174,26 +246,29 @@ def main():
             "Sequence": row.get("Sequence", ""),
             "Length": row.get("Length", ""),
             "Virus hosts": row.get("Virus hosts", ""),
+            "Lineage": row.get("Lineage", ""),
+            "Family": extract_family(row.get("Lineage", "")) or "",
         }
 
+    # Write human/nonhuman splits (legacy format)
     human_path = os.path.join(args.output_dir, "virus_human.tsv")
     nonhuman_path = os.path.join(args.output_dir, "virus_nonhuman.tsv")
-
     write_tsv([remap_row(r) for r in human], human_path, fieldnames)
     write_tsv([remap_row(r) for r in nonhuman], nonhuman_path, fieldnames)
+
+    # Write all viral proteins with family annotation
+    all_viral_path = os.path.join(args.output_dir, "virus_by_family.tsv")
+    write_tsv([remap_row(r) for r in valid_rows], all_viral_path, fieldnames)
 
     print(f"\nWritten:")
     print(f"  {human_path} ({len(human)} sequences)")
     print(f"  {nonhuman_path} ({len(nonhuman)} sequences)")
+    print(f"  {all_viral_path} ({len(valid_rows)} sequences, with family annotation)")
 
-    # Step 5: Sanity check against expected counts
-    print(f"\n--- Sanity check ---")
-    print(f"Expected ~1,239 human / ~349 non-human (from original data)")
-    print(f"Got {len(human)} human / {len(nonhuman)} non-human")
-    if abs(len(human) - 1239) > 100 or abs(len(nonhuman) - 349) > 100:
-        print("WARNING: Counts differ significantly from original data.")
-        print("UniProt is updated regularly — counts may change between releases.")
-        print("Check if the query or filters need adjustment.")
+    # Step 5: Print top families
+    print(f"\n--- Top 10 viral families ---")
+    for family, count in family_counts.most_common(10):
+        print(f"  {family}: {count}")
 
 
 if __name__ == "__main__":

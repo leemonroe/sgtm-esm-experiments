@@ -5,11 +5,14 @@ forget/adjacent/retain categories, and save as HuggingFace datasets.
 Supports multiple forget task granularities:
   - "coarse":  forget = ALL viral proteins, retain = non-viral (no adjacent)
   - "fine":    forget = human-infecting viral, adjacent = other viral, retain = non-viral
+  - "family":  forget = one viral family (e.g. Coronaviridae), adjacent = other viral,
+               retain = non-viral. Uses UniProt lineage taxonomy.
   - "custom":  forget = user-provided TSV, adjacent = remaining viral, retain = non-viral
 
 Usage:
   python -m sgtm.data_pipeline --forget-task coarse
   python -m sgtm.data_pipeline --forget-task fine
+  python -m sgtm.data_pipeline --forget-task family --forget-family Coronaviridae
   python -m sgtm.data_pipeline --forget-task custom --forget-tsv data/raw/my_forget_set.tsv
 """
 
@@ -89,6 +92,23 @@ def load_tsv_sequences(path: str) -> List[str]:
             if len(parts) >= 4:
                 seqs.append(parts[3])
     return seqs
+
+
+def load_tsv_with_family(path: str) -> List[dict]:
+    """Load sequences from virus_by_family.tsv with family annotation.
+
+    Returns list of dicts with 'sequence' and 'family' keys.
+    """
+    import csv
+    entries = []
+    with open(path) as f:
+        reader = csv.DictReader(f, delimiter="\t")
+        for row in reader:
+            entries.append({
+                "sequence": row.get("Sequence", ""),
+                "family": row.get("Family", ""),
+            })
+    return entries
 
 
 # ---------------------------------------------------------------------------
@@ -396,12 +416,16 @@ class MLMCollator:
 
 def main():
     parser = argparse.ArgumentParser(description="SGTM data pipeline")
-    parser.add_argument("--forget-task", choices=["coarse", "fine", "custom"],
+    parser.add_argument("--forget-task", choices=["coarse", "fine", "family", "custom"],
                         default="coarse",
                         help="Forget task granularity: "
                              "coarse = all viral vs non-viral; "
                              "fine = human-infecting vs other; "
+                             "family = one viral family vs other viral; "
                              "custom = user-provided forget TSV")
+    parser.add_argument("--forget-family", type=str, default=None,
+                        help="Viral family to forget (for --forget-task family, "
+                             "e.g. Coronaviridae)")
     parser.add_argument("--forget-tsv", type=str, default=None,
                         help="Path to custom forget set TSV (for --forget-task custom)")
     parser.add_argument("--data-dir", default="data/sgtm",
@@ -454,6 +478,51 @@ def main():
             human_seqs, adjacent_seqs, retain_seqs, output_dir, rng,
             forget_description="Human-infecting viral proteins (species-level annotation)",
             adjacent_description="Non-human viral (curated) + Swiss-Prot viral (header-detected)",
+        )
+
+    elif args.forget_task == "family":
+        if not args.forget_family:
+            parser.error("--forget-family required for --forget-task family")
+
+        # Load the family-annotated TSV
+        family_tsv = os.path.join(args.raw_dir, "virus_by_family.tsv")
+        if not os.path.exists(family_tsv):
+            print(f"ERROR: {family_tsv} not found.")
+            print("Run: python data/download_virus_data.py --output-dir data/raw/")
+            return
+
+        entries = load_tsv_with_family(family_tsv)
+        entries = [e for e in entries if is_valid_sequence(e["sequence"])]
+
+        # Split by target family
+        forget_seqs = [e["sequence"] for e in entries
+                       if e["family"].lower() == args.forget_family.lower()]
+        adjacent_viral = [e["sequence"] for e in entries
+                          if e["family"].lower() != args.forget_family.lower()]
+
+        if not forget_seqs:
+            print(f"ERROR: No sequences found for family '{args.forget_family}'")
+            print("Run: python data/download_virus_data.py --list-families")
+            return
+
+        # Deduplicate against Swiss-Prot viral set already found
+        forget_set = set(forget_seqs)
+        # Adjacent = other viral from family TSV + Swiss-Prot header-detected viral
+        # (deduplicated, excluding forget sequences)
+        adj_set = set(adjacent_viral)
+        for s in viral_swissprot:
+            if s not in forget_set:
+                adj_set.add(s)
+        adjacent_seqs = list(adj_set)
+
+        # Also remove forget sequences from retain (in case of overlap)
+        retain_seqs_clean = [s for s in retain_seqs if s not in forget_set]
+
+        output_dir = os.path.join(args.data_dir, f"family_{args.forget_family.lower()}")
+        prepare_fine(
+            forget_seqs, adjacent_seqs, retain_seqs_clean, output_dir, rng,
+            forget_description=f"{args.forget_family} proteins (taxonomy-based)",
+            adjacent_description=f"Other viral proteins (non-{args.forget_family})",
         )
 
     elif args.forget_task == "custom":
