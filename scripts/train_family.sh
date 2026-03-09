@@ -1,5 +1,5 @@
 #!/bin/bash
-# Weekend run: 8M family-level fine task (Coronaviridae)
+# Weekend run: family-level fine task (Coronaviridae)
 #
 # Forget = Coronaviridae proteins (~486 sequences)
 # Adjacent = all other viral proteins
@@ -9,11 +9,18 @@
 #   Paper: forget "dangerous biographies", adjacent "safe biographies", retain "other text"
 #   Ours:  forget one viral family, adjacent other viral families, retain non-viral
 #
-# Usage:
-#   bash scripts/train_family.sh data      # generate data splits only
-#   bash scripts/train_family.sh train     # run holdout + SGTM training
-#   bash scripts/train_family.sh eval      # evaluate all conditions
-#   bash scripts/train_family.sh all       # everything
+# Usage — run everything for one model size (set-and-forget):
+#   bash scripts/train_family.sh 8m       # data + train + eval for 8M
+#   bash scripts/train_family.sh 35m      # data + train + eval for 35M
+#
+# Or run individual stages:
+#   bash scripts/train_family.sh data         # generate data splits only
+#   bash scripts/train_family.sh train-8m     # train 8M only
+#   bash scripts/train_family.sh train-35m    # train 35M only
+#   bash scripts/train_family.sh eval-8m      # eval 8M only
+#   bash scripts/train_family.sh eval-35m     # eval 35M only
+#   bash scripts/train_family.sh recovery-35m # recovery fine-tuning 35M
+#   bash scripts/train_family.sh all          # everything (8M + 35M + recovery)
 
 set -euo pipefail
 
@@ -23,7 +30,7 @@ DATA_DIR="data/sgtm/family_coronaviridae"
 OUTPUT_DIR="models/sgtm_p2"
 RESULTS_DIR="results/sgtm_p2"
 
-# Hyperparameters (match coarse experiments)
+# RTX 4090 (24GB): batch 4 × accum 32 = effective 128
 BATCH_SIZE=4
 GRAD_ACCUM=32
 RETAIN_RETAIN_PERC=25
@@ -31,9 +38,9 @@ RETAIN_RETAIN_PERC=25
 mkdir -p "$OUTPUT_DIR" "$RESULTS_DIR"
 
 # ============================================================
-# DATA PREPARATION
+# DATA PREPARATION (runs once, shared by 8M and 35M)
 # ============================================================
-if [[ "$STAGE" == "all" || "$STAGE" == "data" ]]; then
+run_data() {
   echo ""
   echo "=========================================="
   echo "  Download viral data with family annotations"
@@ -49,22 +56,24 @@ if [[ "$STAGE" == "all" || "$STAGE" == "data" ]]; then
     --forget-family "$FAMILY" \
     --data-dir data/sgtm \
     --raw-dir data/raw
-fi
+}
 
 # ============================================================
-# 8M TRAINING
+# TRAINING — parameterized by model size
 # ============================================================
-if [[ "$STAGE" == "all" || "$STAGE" == "train" ]]; then
+run_train() {
+  local SIZE="$1"
+
   echo ""
   echo "=========================================="
-  echo "  8M FAMILY: Holdout (no $FAMILY data)"
+  echo "  ${SIZE} FAMILY: Holdout (no $FAMILY data)"
   echo "=========================================="
   python -m sgtm.train_sgtm \
     --mode holdout \
-    --model-size 8M \
+    --model-size "$SIZE" \
     --data-dir "$DATA_DIR" \
     --output-dir "$OUTPUT_DIR" \
-    --run-name "holdout-family-${FAMILY,,}-8m" \
+    --run-name "holdout-family-${FAMILY,,}-${SIZE,,}" \
     --upsample-forget 1 \
     --upsample-adjacent 1 \
     --batch-size "$BATCH_SIZE" \
@@ -73,14 +82,14 @@ if [[ "$STAGE" == "all" || "$STAGE" == "train" ]]; then
 
   echo ""
   echo "=========================================="
-  echo "  8M FAMILY: SGTM ret25 (1 head + MLP)"
+  echo "  ${SIZE} FAMILY: SGTM ret25 (1 head + MLP)"
   echo "=========================================="
   python -m sgtm.train_sgtm \
     --mode sgtm \
-    --model-size 8M \
+    --model-size "$SIZE" \
     --data-dir "$DATA_DIR" \
     --output-dir "$OUTPUT_DIR" \
-    --run-name "sgtm-family-${FAMILY,,}-8m" \
+    --run-name "sgtm-family-${FAMILY,,}-${SIZE,,}" \
     --upsample-forget 1 \
     --upsample-adjacent 1 \
     --retain-retain-perc "$RETAIN_RETAIN_PERC" \
@@ -89,35 +98,102 @@ if [[ "$STAGE" == "all" || "$STAGE" == "train" ]]; then
     --batch-size "$BATCH_SIZE" \
     --grad-accum "$GRAD_ACCUM" \
     --device cuda
-fi
+}
 
 # ============================================================
-# 8M EVAL
+# EVAL — parameterized by model size
 # ============================================================
-if [[ "$STAGE" == "all" || "$STAGE" == "eval" ]]; then
+run_eval() {
+  local SIZE="$1"
+
   echo ""
   echo "=========================================="
-  echo "  8M EVAL: PPL + ablation"
+  echo "  ${SIZE} EVAL: PPL + ablation"
   echo "=========================================="
   python -m sgtm.evaluate_sgtm \
-    --model-size 8M \
+    --model-size "$SIZE" \
     --models-dir "$OUTPUT_DIR" \
     --data-dir "$DATA_DIR" \
     --output-dir "$RESULTS_DIR" \
-    --runs "holdout-family-${FAMILY,,}-8m,sgtm-family-${FAMILY,,}-8m" \
+    --runs "holdout-family-${FAMILY,,}-${SIZE,,},sgtm-family-${FAMILY,,}-${SIZE,,}" \
     --device cuda
 
   echo ""
   echo "=========================================="
-  echo "  8M EVAL: Linear probes"
+  echo "  ${SIZE} EVAL: Linear probes"
   echo "=========================================="
   python -m sgtm.linear_probe \
-    --model-size 8M \
+    --model-size "$SIZE" \
     --models-dir "$OUTPUT_DIR" \
     --data-dir "$DATA_DIR" \
     --output-dir "$RESULTS_DIR" \
     --device cuda
-fi
+}
+
+# ============================================================
+# RECOVERY FINE-TUNING
+# ============================================================
+run_recovery() {
+  local SIZE="$1"
+
+  echo ""
+  echo "=========================================="
+  echo "  ${SIZE}: Recovery fine-tuning (holdout → forget data)"
+  echo "=========================================="
+  python -m sgtm.recovery_finetune \
+    --model-size "$SIZE" \
+    --checkpoint "$OUTPUT_DIR/holdout-family-${FAMILY,,}-${SIZE,,}/final_model.pt" \
+    --data-dir "$DATA_DIR" \
+    --output-dir "$RESULTS_DIR/recovery-family-${SIZE,,}" \
+    --device cuda
+}
+
+# ============================================================
+# DISPATCH
+# ============================================================
+case "$STAGE" in
+  data)
+    run_data
+    ;;
+  train-8m)
+    run_train 8M
+    ;;
+  train-35m)
+    run_train 35M
+    ;;
+  eval-8m)
+    run_eval 8M
+    ;;
+  eval-35m)
+    run_eval 35M
+    ;;
+  recovery-35m)
+    run_recovery 35M
+    ;;
+  8m)
+    run_data
+    run_train 8M
+    run_eval 8M
+    ;;
+  35m)
+    run_data
+    run_train 35M
+    run_eval 35M
+    run_recovery 35M
+    ;;
+  all)
+    run_data
+    run_train 8M
+    run_eval 8M
+    run_train 35M
+    run_eval 35M
+    run_recovery 35M
+    ;;
+  *)
+    echo "Usage: bash scripts/train_family.sh {data|8m|35m|train-8m|train-35m|eval-8m|eval-35m|recovery-35m|all}"
+    exit 1
+    ;;
+esac
 
 echo ""
-echo "=== Family task ($FAMILY) complete ==="
+echo "=== Family task ($FAMILY, $STAGE) complete ==="
