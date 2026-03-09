@@ -27,8 +27,8 @@ set -euo pipefail
 STAGE="${1:-all}"
 FAMILY="Coronaviridae"
 DATA_DIR="data/sgtm/family_coronaviridae"
-OUTPUT_DIR="models/sgtm_p2"
-RESULTS_DIR="results/sgtm_p2"
+OUTPUT_DIR="models/sgtm_p2/family_coronaviridae"
+RESULTS_DIR="results/sgtm_p2/family_coronaviridae"
 
 # RTX 4090 (24GB): batch 4 × accum 32 = effective 128
 BATCH_SIZE=4
@@ -73,7 +73,7 @@ run_train() {
     --model-size "$SIZE" \
     --data-dir "$DATA_DIR" \
     --output-dir "$OUTPUT_DIR" \
-    --run-name "holdout-family-${FAMILY,,}-${SIZE,,}" \
+    --run-name "holdout-${SIZE,,}" \
     --upsample-forget 1 \
     --upsample-adjacent 1 \
     --batch-size "$BATCH_SIZE" \
@@ -89,7 +89,7 @@ run_train() {
     --model-size "$SIZE" \
     --data-dir "$DATA_DIR" \
     --output-dir "$OUTPUT_DIR" \
-    --run-name "sgtm-family-${FAMILY,,}-${SIZE,,}" \
+    --run-name "sgtm-ret25-${SIZE,,}" \
     --upsample-forget 1 \
     --upsample-adjacent 1 \
     --retain-retain-perc "$RETAIN_RETAIN_PERC" \
@@ -115,7 +115,7 @@ run_eval() {
     --models-dir "$OUTPUT_DIR" \
     --data-dir "$DATA_DIR" \
     --output-dir "$RESULTS_DIR" \
-    --runs "holdout-family-${FAMILY,,}-${SIZE,,},sgtm-family-${FAMILY,,}-${SIZE,,}" \
+    --runs "holdout-${SIZE,,},sgtm-ret25-${SIZE,,}" \
     --device cuda
 
   echo ""
@@ -142,9 +142,9 @@ run_recovery() {
   echo "=========================================="
   python -m sgtm.recovery_finetune \
     --model-size "$SIZE" \
-    --checkpoint "$OUTPUT_DIR/holdout-family-${FAMILY,,}-${SIZE,,}/final_model.pt" \
+    --checkpoint "$OUTPUT_DIR/holdout-${SIZE,,}/final_model.pt" \
     --data-dir "$DATA_DIR" \
-    --output-dir "$RESULTS_DIR/recovery-family-${SIZE,,}" \
+    --output-dir "$RESULTS_DIR/recovery-${SIZE,,}" \
     --device cuda
 }
 
