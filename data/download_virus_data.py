@@ -214,7 +214,7 @@ def main():
     family_counts = Counter()
     no_family = 0
     for row in valid_rows:
-        family = extract_family(row.get("Lineage", ""))
+        family = extract_family(row.get("Taxonomic lineage", "") or row.get("Lineage", ""))
         if family:
             family_counts[family] += 1
         else:
@@ -239,6 +239,8 @@ def main():
                   "Virus hosts", "Lineage", "Family"]
 
     def remap_row(row):
+        # UniProt API returns "Taxonomic lineage" as the column header for the lineage field
+        lineage = row.get("Taxonomic lineage", "") or row.get("Lineage", "")
         return {
             "Entry": row.get("Entry", ""),
             "Protein names": row.get("Protein names", ""),
@@ -246,8 +248,8 @@ def main():
             "Sequence": row.get("Sequence", ""),
             "Length": row.get("Length", ""),
             "Virus hosts": row.get("Virus hosts", ""),
-            "Lineage": row.get("Lineage", ""),
-            "Family": extract_family(row.get("Lineage", "")) or "",
+            "Lineage": lineage,
+            "Family": extract_family(lineage) or "",
         }
 
     # Write human/nonhuman splits (legacy format)
