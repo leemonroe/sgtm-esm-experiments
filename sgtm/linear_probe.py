@@ -3,16 +3,18 @@ Linear probe evaluation for SGTM models.
 
 Extracts mean-pooled last-layer embeddings and trains logistic regression
 classifiers to measure how well each model condition retains/forgets
-viral classification capability.
+knowledge matching the forget boundary.
 
-Tasks:
-  1. Human-infecting vs non-human viral protein classification
-  2. Viral vs non-viral protein classification
+Probes are constructed automatically from the data splits:
+  - Forget vs All (adjacent + retain): matches the forget boundary exactly
+  - Forget vs Adjacent: hardest test (within-domain discrimination)
+  - Forget vs Retain: easiest test (cross-domain discrimination)
 
-Conditions: baseline, holdout, sgtm (pre-ablation), sgtm (post-ablation)
+Works for any forget task (coarse, fine, family) without hardcoded categories.
 
 Usage:
-  python -m sgtm.linear_probe --model-size 8M --models-dir models/sgtm --device cuda
+  python -m sgtm.linear_probe --model-size 8M --models-dir models/sgtm --data-dir data/sgtm/family_coronaviridae --device cuda
+  python -m sgtm.linear_probe --model-size 35M --models-dir models/sgtm --data-dir data/sgtm/coarse --runs "holdout-35m,sgtm-ret25-35m" --device cuda
 """
 
 import argparse
@@ -39,64 +41,86 @@ except ImportError:
     HAS_WANDB = False
 
 
-def load_virus_sequences(data_dir="data/sgtm"):
-    """Load human-infecting vs non-human viral sequences from held-out val splits.
+# ── Data loading ──────────────────────────────────────────────────────
 
-    Only works for the fine-grained task (requires both forget and adjacent splits).
-    Returns None, None if adjacent split doesn't exist (coarse task).
-    """
+def load_split_sequences(data_dir, split_name, partition="val"):
+    """Load sequences from a data split. Returns list of sequences or None."""
     from datasets import load_from_disk
-
-    adjacent_path = os.path.join(data_dir, "adjacent", "val")
-    if not os.path.isdir(adjacent_path):
-        return None, None
-
-    sequences = []
-    labels = []
-
-    forget_val = load_from_disk(os.path.join(data_dir, "forget", "val"))
-    for row in forget_val:
-        sequences.append(row["sequence"])
-        labels.append(1)
-
-    adjacent_val = load_from_disk(adjacent_path)
-    for row in adjacent_val:
-        sequences.append(row["sequence"])
-        labels.append(0)
-
-    return sequences, labels
+    split_path = os.path.join(data_dir, split_name, partition)
+    if not os.path.isdir(split_path):
+        return None
+    ds = load_from_disk(split_path)
+    return [row["sequence"] for row in ds]
 
 
-def load_viral_vs_nonviral(data_dir="data/sgtm", seed=42):
-    """Load balanced viral vs non-viral sequences for Task 2.
+def build_probe_tasks(data_dir, seed=42):
+    """Build probe tasks adaptively from whatever splits exist.
 
-    Works for both coarse and fine tasks. Viral = forget + adjacent (if present).
+    Returns a dict of {task_name: (sequences, labels, description)}.
     """
-    from datasets import load_from_disk
+    forget_seqs = load_split_sequences(data_dir, "forget")
+    adjacent_seqs = load_split_sequences(data_dir, "adjacent")
+    retain_seqs = load_split_sequences(data_dir, "retain")
 
-    # Viral from val splits
-    viral_seqs = []
-    for split in ("forget", "adjacent"):
-        split_path = os.path.join(data_dir, split, "val")
-        if os.path.isdir(split_path):
-            ds = load_from_disk(split_path)
-            for row in ds:
-                viral_seqs.append(row["sequence"])
+    if forget_seqs is None:
+        print("WARNING: No forget/val split found — cannot build probes.")
+        return {}
 
-    if not viral_seqs:
-        return None, None
-
-    # Non-viral from retain val
-    retain_val = load_from_disk(os.path.join(data_dir, "retain", "val"))
     rng = np.random.RandomState(seed)
-    n_nonviral = len(viral_seqs)  # balance classes
-    indices = rng.choice(len(retain_val), size=min(n_nonviral, len(retain_val)), replace=False)
-    nonviral_seqs = [retain_val[int(i)]["sequence"] for i in indices]
+    tasks = {}
 
-    sequences = viral_seqs + nonviral_seqs
-    labels = [1] * len(viral_seqs) + [0] * len(nonviral_seqs)
-    return sequences, labels
+    # Task 1: Forget vs All (the primary probe — matches forget boundary)
+    neg_seqs = []
+    if adjacent_seqs:
+        neg_seqs.extend(adjacent_seqs)
+    if retain_seqs:
+        # Subsample retain to balance with forget + adjacent
+        n_retain = max(len(forget_seqs) - len(neg_seqs), len(forget_seqs))
+        n_retain = min(n_retain, len(retain_seqs))
+        idx = rng.choice(len(retain_seqs), size=n_retain, replace=False)
+        neg_seqs.extend([retain_seqs[i] for i in idx])
 
+    if neg_seqs:
+        # Balance: subsample negative to match positive (or vice versa)
+        if len(neg_seqs) > len(forget_seqs) * 3:
+            idx = rng.choice(len(neg_seqs), size=len(forget_seqs) * 2, replace=False)
+            neg_seqs = [neg_seqs[i] for i in idx]
+
+        seqs = forget_seqs + neg_seqs
+        labels = [1] * len(forget_seqs) + [0] * len(neg_seqs)
+        n_pos, n_neg = len(forget_seqs), len(neg_seqs)
+        tasks["forget_vs_all"] = (seqs, labels,
+            f"Forget vs All ({n_pos} forget, {n_neg} other)")
+
+    # Task 2: Forget vs Adjacent (fine-grained, only if adjacent exists)
+    if adjacent_seqs:
+        # Balance classes
+        if len(adjacent_seqs) > len(forget_seqs) * 3:
+            idx = rng.choice(len(adjacent_seqs), size=len(forget_seqs) * 2, replace=False)
+            adj_sample = [adjacent_seqs[i] for i in idx]
+        else:
+            adj_sample = adjacent_seqs
+
+        seqs = forget_seqs + adj_sample
+        labels = [1] * len(forget_seqs) + [0] * len(adj_sample)
+        tasks["forget_vs_adjacent"] = (seqs, labels,
+            f"Forget vs Adjacent ({len(forget_seqs)} forget, {len(adj_sample)} adjacent)")
+
+    # Task 3: Forget vs Retain (cross-domain)
+    if retain_seqs:
+        n_retain = min(len(forget_seqs) * 2, len(retain_seqs))
+        idx = rng.choice(len(retain_seqs), size=n_retain, replace=False)
+        ret_sample = [retain_seqs[i] for i in idx]
+
+        seqs = forget_seqs + ret_sample
+        labels = [1] * len(forget_seqs) + [0] * len(ret_sample)
+        tasks["forget_vs_retain"] = (seqs, labels,
+            f"Forget vs Retain ({len(forget_seqs)} forget, {len(ret_sample)} retain)")
+
+    return tasks
+
+
+# ── Embedding extraction ─────────────────────────────────────────────
 
 def extract_embeddings(model, alphabet, sequences, device, batch_size=8):
     """Extract mean-pooled last-layer embeddings."""
@@ -130,6 +154,8 @@ def logreg_cv(embeddings, labels, cv=5):
     return float(scores.mean()), float(scores.std())
 
 
+# ── Main ─────────────────────────────────────────────────────────────
+
 def main():
     parser = argparse.ArgumentParser(description="Linear probe evaluation for SGTM")
     parser.add_argument("--model-size", type=str, default="8M")
@@ -161,20 +187,15 @@ def main():
 
     alphabet = load_alphabet()
 
-    # Load evaluation data
-    print("Loading Task 1: human-infecting vs non-human viral...")
-    task1_seqs, task1_labels = load_virus_sequences(args.data_dir)
-    if task1_seqs is None:
-        print("  Skipped — no adjacent split (coarse task?)")
-    else:
-        print(f"  {sum(task1_labels)} human-infecting, {len(task1_labels) - sum(task1_labels)} non-human")
+    # Build probe tasks from data splits
+    print(f"Building probe tasks from {args.data_dir}...")
+    tasks = build_probe_tasks(args.data_dir)
+    if not tasks:
+        print("No probe tasks could be built. Check data directory.")
+        return
 
-    print("Loading Task 2: viral vs non-viral...")
-    task2_seqs, task2_labels = load_viral_vs_nonviral(args.data_dir)
-    if task2_seqs is None:
-        print("  Skipped — no viral sequences found")
-    else:
-        print(f"  {sum(task2_labels)} viral, {len(task2_labels) - sum(task2_labels)} non-viral")
+    for name, (seqs, labels, desc) in tasks.items():
+        print(f"  {name}: {desc}")
 
     # Discover model conditions
     if args.runs:
@@ -187,7 +208,7 @@ def main():
         if os.path.exists(ckpt):
             if run_names is None or entry in run_names:
                 conditions.append(entry)
-    print(f"\nConditions found: {conditions}")
+    print(f"\nConditions: {conditions}")
 
     all_results = {}
 
@@ -199,20 +220,13 @@ def main():
 
         model, _ = load_model_from_checkpoint(cfg, ckpt_path, args.device)
 
-        # Pre-ablation embeddings & probes
+        # Pre-ablation probes
         cond_results = {}
-
-        if task1_seqs is not None:
-            emb1 = extract_embeddings(model, alphabet, task1_seqs, args.device, args.batch_size)
-            t1_acc, t1_std = logreg_cv(emb1, task1_labels)
-            print(f"  Task 1 (human vs non-human): {t1_acc:.3f} +/- {t1_std:.3f}")
-            cond_results["task1_human_vs_nonhuman"] = {"mean": t1_acc, "std": t1_std}
-
-        if task2_seqs is not None:
-            emb2 = extract_embeddings(model, alphabet, task2_seqs, args.device, args.batch_size)
-            t2_acc, t2_std = logreg_cv(emb2, task2_labels)
-            print(f"  Task 2 (viral vs non-viral): {t2_acc:.3f} +/- {t2_std:.3f}")
-            cond_results["task2_viral_vs_nonviral"] = {"mean": t2_acc, "std": t2_std}
+        for task_name, (seqs, labels, desc) in tasks.items():
+            emb = extract_embeddings(model, alphabet, seqs, args.device, args.batch_size)
+            acc, std = logreg_cv(emb, labels)
+            print(f"  {task_name}: {acc:.3f} +/- {std:.3f}")
+            cond_results[task_name] = {"mean": acc, "std": std}
 
         all_results[cond_name] = cond_results
 
@@ -235,46 +249,41 @@ def main():
             abl_results = {}
             print(f"\n  [post-ablation]")
 
-            if task1_seqs is not None:
-                emb1_abl = extract_embeddings(model, alphabet, task1_seqs, args.device, args.batch_size)
-                t1_acc_abl, t1_std_abl = logreg_cv(emb1_abl, task1_labels)
-                print(f"  Task 1: {t1_acc_abl:.3f} +/- {t1_std_abl:.3f}")
-                abl_results["task1_human_vs_nonhuman"] = {"mean": t1_acc_abl, "std": t1_std_abl}
-
-            if task2_seqs is not None:
-                emb2_abl = extract_embeddings(model, alphabet, task2_seqs, args.device, args.batch_size)
-                t2_acc_abl, t2_std_abl = logreg_cv(emb2_abl, task2_labels)
-                print(f"  Task 2: {t2_acc_abl:.3f} +/- {t2_std_abl:.3f}")
-                abl_results["task2_viral_vs_nonviral"] = {"mean": t2_acc_abl, "std": t2_std_abl}
+            for task_name, (seqs, labels, desc) in tasks.items():
+                emb = extract_embeddings(model, alphabet, seqs, args.device, args.batch_size)
+                acc, std = logreg_cv(emb, labels)
+                print(f"  {task_name}: {acc:.3f} +/- {std:.3f}")
+                abl_results[task_name] = {"mean": acc, "std": std}
 
             all_results[abl_name] = abl_results
 
-    # Summary
-    task_names = []
-    if task1_seqs is not None:
-        task_names.append(("task1_human_vs_nonhuman", "Task1 (h vs nh)"))
-    if task2_seqs is not None:
-        task_names.append(("task2_viral_vs_nonviral", "Task2 (v vs nv)"))
-
-    header = f"{'Condition':<30}" + "".join(f" {label:>16}" for _, label in task_names)
+    # Summary table
+    task_labels = {name: name.replace("_", " ").title() for name in tasks}
+    header = f"{'Condition':<35}" + "".join(f" {label:>20}" for label in task_labels.values())
     print(f"\n{'=' * len(header)}")
     print(header)
     print(f"{'-' * len(header)}")
     for name, r in all_results.items():
-        row = f"{name:<30}"
-        for key, _ in task_names:
-            if key in r:
-                row += f" {r[key]['mean']:.3f}±{r[key]['std']:.3f}    "
+        row = f"{name:<35}"
+        for task_name in task_labels:
+            if task_name in r:
+                row += f" {r[task_name]['mean']:.3f}±{r[task_name]['std']:.3f}      "
             else:
-                row += f" {'N/A':>16}"
+                row += f" {'N/A':>20}"
         print(row)
     print(f"{'=' * len(header)}")
 
     # Save
     size_tag = args.model_size.lower().replace("-", "")
     out_path = os.path.join(args.output_dir, f"linear_probe_results_{size_tag}.json")
+
+    # Include task metadata in output
+    output = {
+        "task_descriptions": {name: desc for name, (_, _, desc) in tasks.items()},
+        "results": all_results,
+    }
     with open(out_path, "w") as f:
-        json.dump(all_results, f, indent=2)
+        json.dump(output, f, indent=2)
     print(f"\nSaved to {out_path}")
 
     if use_wandb:
