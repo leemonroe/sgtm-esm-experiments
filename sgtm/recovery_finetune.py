@@ -37,6 +37,7 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from sgtm.data_pipeline import MLMCollator
+from sgtm.masking import ablate, build_sgtm_masks
 from sgtm.model_config import get_config, load_alphabet, load_model_from_checkpoint
 
 try:
@@ -75,7 +76,9 @@ def main():
     parser = argparse.ArgumentParser(description="Recovery fine-tuning experiment")
     parser.add_argument("--model-size", type=str, required=True, help="8M or 35M")
     parser.add_argument("--checkpoint", type=str, required=True,
-                        help="Path to holdout final_model.pt")
+                        help="Path to holdout or SGTM final_model.pt")
+    parser.add_argument("--ablate", action="store_true",
+                        help="Ablate forget params before fine-tuning (for SGTM recovery)")
     parser.add_argument("--data-dir", default="data/sgtm")
     parser.add_argument("--output-dir", default="results/sgtm/recovery")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -114,6 +117,17 @@ def main():
     # ------------------------------------------------------------------
     print(f"Loading {cfg.name} from {args.checkpoint}...")
     model, alphabet = load_model_from_checkpoint(cfg, args.checkpoint, args.device)
+
+    if args.ablate:
+        print("Ablating forget parameters before fine-tuning...")
+        _, forget_mask = build_sgtm_masks(
+            model, head_dim=cfg.head_dim,
+            forget_head_indices=list(cfg.default_forget_heads),
+            forget_mlp_start=cfg.default_forget_mlp_start,
+        )
+        ablate(model, forget_mask)
+        print("  Forget parameters zeroed.")
+
     model.train()
     print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
@@ -178,7 +192,8 @@ def main():
     # ------------------------------------------------------------------
     # Wandb
     # ------------------------------------------------------------------
-    run_name = args.run_name or f"recovery-{cfg.name}-holdout"
+    source_tag = "ablated" if args.ablate else "holdout"
+    run_name = args.run_name or f"recovery-{cfg.name}-{source_tag}"
     use_wandb = HAS_WANDB and not args.no_wandb
     if use_wandb:
         wandb.init(

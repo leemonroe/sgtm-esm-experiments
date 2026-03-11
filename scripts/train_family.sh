@@ -145,6 +145,20 @@ run_recovery() {
     --checkpoint "$OUTPUT_DIR/holdout-${SIZE,,}/final_model.pt" \
     --data-dir "$DATA_DIR" \
     --output-dir "$RESULTS_DIR/recovery-${SIZE,,}" \
+    --no-wandb \
+    --device cuda
+
+  echo ""
+  echo "=========================================="
+  echo "  ${SIZE}: Recovery fine-tuning (SGTM ablated → forget data)"
+  echo "=========================================="
+  python -m sgtm.recovery_finetune \
+    --model-size "$SIZE" \
+    --checkpoint "$OUTPUT_DIR/sgtm-ret25-${SIZE,,}/final_model.pt" \
+    --ablate \
+    --data-dir "$DATA_DIR" \
+    --output-dir "$RESULTS_DIR/recovery-${SIZE,,}" \
+    --no-wandb \
     --device cuda
 }
 
