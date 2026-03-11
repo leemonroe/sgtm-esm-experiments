@@ -180,6 +180,8 @@ def main():
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--max-samples-per-dataset", type=int, default=None,
                         help="Limit samples per DMS dataset (for faster testing)")
+    parser.add_argument("--runs", type=str, default=None,
+                        help="Comma-separated list of run names to evaluate (default: all)")
     parser.add_argument("--wandb-project", type=str, default=None)
     parser.add_argument("--no-wandb", action="store_true")
     args = parser.parse_args()
@@ -224,11 +226,16 @@ def main():
     alphabet = load_alphabet()
 
     # Discover model conditions
+    if args.runs:
+        run_names = [r.strip() for r in args.runs.split(",")]
+    else:
+        run_names = None
     conditions = []
     for entry in sorted(os.listdir(args.models_dir)):
         ckpt = os.path.join(args.models_dir, entry, "final_model.pt")
         if os.path.exists(ckpt):
-            conditions.append(entry)
+            if run_names is None or entry in run_names:
+                conditions.append(entry)
     print(f"\nConditions: {conditions}")
 
     all_results = {}
