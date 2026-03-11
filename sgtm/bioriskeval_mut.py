@@ -317,7 +317,8 @@ def main():
     print(f"{'=' * 70}")
 
     # Save
-    out_path = os.path.join(args.output_dir, "bioriskeval_mut_results.json")
+    size_tag = args.model_size.lower().replace("-", "")
+    out_path = os.path.join(args.output_dir, f"bioriskeval_mut_results_{size_tag}.json")
     with open(out_path, "w") as f:
         json.dump(all_results, f, indent=2)
     print(f"\nSaved to {out_path}")

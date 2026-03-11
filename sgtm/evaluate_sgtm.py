@@ -326,7 +326,8 @@ def main():
         "absolute_ppl": all_results,
         "ablation_ratios": ablation_ratios,
     }
-    results_path = os.path.join(args.output_dir, "perplexity_results.json")
+    size_tag = args.model_size.lower().replace("-", "")
+    results_path = os.path.join(args.output_dir, f"perplexity_results_{size_tag}.json")
     with open(results_path, "w") as f:
         json.dump(output, f, indent=2)
     print(f"\nResults saved to {results_path}")
@@ -345,7 +346,7 @@ def main():
     if len(all_results) > 1:
         plot_perplexity_comparison(
             all_results,
-            os.path.join(args.output_dir, "perplexity_comparison.png"),
+            os.path.join(args.output_dir, f"perplexity_comparison_{size_tag}.png"),
         )
 
     for run_name in run_names:
@@ -357,7 +358,7 @@ def main():
                 os.path.join(args.output_dir, f"ablation_{run_name}.png"),
             )
 
-    plot_training_curves(args.models_dir, os.path.join(args.output_dir, "training_curves.png"))
+    plot_training_curves(args.models_dir, os.path.join(args.output_dir, f"training_curves_{size_tag}.png"))
 
     # Success criteria check for each SGTM variant
     baseline_retain = all_results.get("baseline", {}).get("retain")

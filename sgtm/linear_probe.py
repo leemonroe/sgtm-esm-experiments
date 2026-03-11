@@ -264,7 +264,8 @@ def main():
     print(f"{'=' * len(header)}")
 
     # Save
-    out_path = os.path.join(args.output_dir, "linear_probe_results.json")
+    size_tag = args.model_size.lower().replace("-", "")
+    out_path = os.path.join(args.output_dir, f"linear_probe_results_{size_tag}.json")
     with open(out_path, "w") as f:
         json.dump(all_results, f, indent=2)
     print(f"\nSaved to {out_path}")
