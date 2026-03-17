@@ -184,6 +184,8 @@ def main():
                         help="Comma-separated list of run names to evaluate (default: all)")
     parser.add_argument("--wandb-project", type=str, default=None)
     parser.add_argument("--no-wandb", action="store_true")
+    parser.add_argument("--include-pretrained", action="store_true",
+                        help="Also evaluate the pretrained ESM-2 model as a baseline")
     args = parser.parse_args()
 
     cfg = get_config(args.model_size)
@@ -239,6 +241,37 @@ def main():
     print(f"\nConditions: {conditions}")
 
     all_results = {}
+
+    # Optionally evaluate pretrained ESM-2 baseline first
+    if args.include_pretrained:
+        print(f"\n{'=' * 60}")
+        print(f"Evaluating: pretrained ({cfg.pretrained_fn})")
+        print(f"{'=' * 60}")
+        import esm as esm_module
+        pretrained_model, pretrained_alphabet = esm_module.pretrained.load_model_and_alphabet(cfg.pretrained_fn)
+        pretrained_model = pretrained_model.to(args.device)
+        pretrained_model.eval()
+
+        pt_results = {}
+        for ds_name, records in sorted(datasets_by_name.items()):
+            print(f"\n  Dataset: {ds_name} ({len(records)} mutants)")
+            scores, true_scores, true_bins = evaluate_dms_dataset(
+                pretrained_model, pretrained_alphabet, records, args.device,
+            )
+            metrics = compute_metrics(scores, true_scores, true_bins)
+            pt_results[ds_name] = metrics
+            print(f"    |Spearman rho| = {metrics.get('spearman_abs', 'N/A'):.4f}"
+                  f"  AUC = {metrics.get('auc_roc', 'N/A')}"
+                  f"  n = {metrics['n_samples']}")
+
+        rhos = [m["spearman_abs"] for m in pt_results.values() if "spearman_abs" in m]
+        all_results["pretrained"] = {
+            "mean_abs_spearman": float(np.mean(rhos)) if rhos else None,
+            "median_abs_spearman": float(np.median(rhos)) if rhos else None,
+            "per_dataset": pt_results,
+        }
+        print(f"\n  Pretrained aggregate |Spearman|: mean={all_results['pretrained']['mean_abs_spearman']:.4f}")
+        del pretrained_model  # free GPU memory
 
     for cond_name in conditions:
         ckpt_path = os.path.join(args.models_dir, cond_name, "final_model.pt")

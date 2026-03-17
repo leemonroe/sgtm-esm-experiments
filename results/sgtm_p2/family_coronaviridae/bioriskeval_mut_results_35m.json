@@ -1,0 +1,356 @@
+{
+  "holdout-35m": {
+    "mean_abs_spearman": 0.11328406348922863,
+    "median_abs_spearman": 0.13580586284475882,
+    "per_dataset": {
+      "A0A192B1T2_9HIV1_Haddox_2018.csv": {
+        "spearman_rho": -0.01985741071039914,
+        "spearman_abs": 0.01985741071039914,
+        "spearman_pval": 0.02909274968203973,
+        "auc_roc": 0.49656985419139027,
+        "mcc": -0.004091168977367802,
+        "n_samples": 12077
+      },
+      "A0A2Z5U3Z0_9INFA_Doud_2016.csv": {
+        "spearman_rho": 0.13246868526857816,
+        "spearman_abs": 0.13246868526857816,
+        "spearman_pval": 3.242360667265907e-41,
+        "auc_roc": 0.5658479026514653,
+        "mcc": 0.07958885028748142,
+        "n_samples": 10215
+      },
+      "A0A2Z5U3Z0_9INFA_Wu_2014.csv": {
+        "spearman_rho": 0.16859908775147026,
+        "spearman_abs": 0.16859908775147026,
+        "spearman_pval": 2.896358062299369e-13,
+        "auc_roc": 0.5881127830533236,
+        "mcc": 0.1264864864864865,
+        "n_samples": 1850
+      },
+      "A4D664_9INFA_Soh_2019.csv": {
+        "spearman_rho": 0.0636818313674202,
+        "spearman_abs": 0.0636818313674202,
+        "spearman_pval": 5.45230732213541e-14,
+        "auc_roc": 0.5387849091902834,
+        "mcc": 0.04173550256189245,
+        "n_samples": 13921
+      },
+      "C6KNH7_9INFA_Lee_2018.csv": {
+        "spearman_rho": 0.05868788482333327,
+        "spearman_abs": 0.05868788482333327,
+        "spearman_pval": 2.726741053738931e-09,
+        "auc_roc": 0.5215228153221039,
+        "mcc": 0.030622196216110786,
+        "n_samples": 10254
+      },
+      "CAPSD_AAV2S_Sinai_2021.csv": {
+        "spearman_rho": 0.1807352010287514,
+        "spearman_abs": 0.1807352010287514,
+        "spearman_pval": 5.0304860865020994e-304,
+        "auc_roc": 0.5988247446120912,
+        "mcc": 0.13348659632460072,
+        "n_samples": 41828
+      },
+      "I6TAH8_I68A0_Doud_2015.csv": {
+        "spearman_rho": 0.2012803162605032,
+        "spearman_abs": 0.2012803162605032,
+        "spearman_pval": 1.4270029631233704e-82,
+        "auc_roc": 0.6099642812338499,
+        "mcc": 0.16982816335639367,
+        "n_samples": 8962
+      },
+      "PA_I34A1_Wu_2015.csv": {
+        "spearman_rho": 0.16727768595325912,
+        "spearman_abs": 0.16727768595325912,
+        "spearman_pval": 9.663210913363923e-10,
+        "auc_roc": 0.5978719008264463,
+        "mcc": 0.14242424242424243,
+        "n_samples": 1320
+      },
+      "POLG_DEN26_Suphatrakul_2023.csv": {
+        "spearman_rho": -0.032643172940383144,
+        "spearman_abs": 0.032643172940383144,
+        "spearman_pval": 2.9051225450032693e-05,
+        "auc_roc": 0.48334338608880145,
+        "mcc": -0.006891500849760595,
+        "n_samples": 16397
+      },
+      "Q2N0S5_9HIV1_Haddox_2018.csv": {
+        "spearman_rho": -0.011732070791277398,
+        "spearman_abs": 0.011732070791277398,
+        "spearman_pval": 0.19452769854742302,
+        "auc_roc": 0.5109626952105069,
+        "mcc": 0.020714730736059617,
+        "n_samples": 12229
+      },
+      "R1AB_SARS2_Flynn_2022.csv": {
+        "spearman_rho": -0.028080160860387133,
+        "spearman_abs": 0.028080160860387133,
+        "spearman_pval": 0.042390558532910606,
+        "auc_roc": 0.49787641985962605,
+        "mcc": 0.016380646124983588,
+        "n_samples": 5225
+      },
+      "RDRP_I33A0_Li_2023.csv": {
+        "spearman_rho": 0.16044818033208902,
+        "spearman_abs": 0.16044818033208902,
+        "spearman_pval": 3.391465200047653e-67,
+        "auc_roc": 0.6077528177231012,
+        "mcc": 0.1354104933340606,
+        "n_samples": 11503
+      },
+      "REV_HV1H2_Fernandes_2016.csv": {
+        "spearman_rho": 0.1391430404209395,
+        "spearman_abs": 0.1391430404209395,
+        "spearman_pval": 1.4263748954289571e-08,
+        "auc_roc": 0.5705672932563689,
+        "mcc": 0.08318008828134564,
+        "n_samples": 1647
+      },
+      "TAT_HV1BR_Fernandes_2016.csv": {
+        "spearman_rho": 0.22134216034041032,
+        "spearman_abs": 0.22134216034041032,
+        "spearman_pval": 2.0298899926522565e-13,
+        "auc_roc": 0.6381389982893741,
+        "mcc": 0.18685370362089457,
+        "n_samples": 1077
+      }
+    }
+  },
+  "sgtm-ret25-35m": {
+    "mean_abs_spearman": 0.09542612859200224,
+    "median_abs_spearman": 0.0935870998390882,
+    "per_dataset": {
+      "A0A192B1T2_9HIV1_Haddox_2018.csv": {
+        "spearman_rho": -0.008801511538541968,
+        "spearman_abs": 0.008801511538541968,
+        "spearman_pval": 0.33346191184240687,
+        "auc_roc": 0.4988993913652988,
+        "mcc": 0.0025733459765584763,
+        "n_samples": 12077
+      },
+      "A0A2Z5U3Z0_9INFA_Doud_2016.csv": {
+        "spearman_rho": 0.054657229048595254,
+        "spearman_abs": 0.054657229048595254,
+        "spearman_pval": 3.2459883935228314e-08,
+        "auc_roc": 0.5248718918664464,
+        "mcc": 0.0349486149110676,
+        "n_samples": 10215
+      },
+      "A0A2Z5U3Z0_9INFA_Wu_2014.csv": {
+        "spearman_rho": 0.10901555668281408,
+        "spearman_abs": 0.10901555668281408,
+        "spearman_pval": 2.6044183965550326e-06,
+        "auc_roc": 0.5487123447772096,
+        "mcc": 0.07027027027027027,
+        "n_samples": 1850
+      },
+      "A4D664_9INFA_Soh_2019.csv": {
+        "spearman_rho": 0.1403882198378675,
+        "spearman_abs": 0.1403882198378675,
+        "spearman_pval": 3.2880984476007086e-62,
+        "auc_roc": 0.5733485680482557,
+        "mcc": 0.11098340177706004,
+        "n_samples": 13921
+      },
+      "C6KNH7_9INFA_Lee_2018.csv": {
+        "spearman_rho": 0.022527144183437743,
+        "spearman_abs": 0.022527144183437743,
+        "spearman_pval": 0.02253922635083255,
+        "auc_roc": 0.5040361020825851,
+        "mcc": 0.022820362785254535,
+        "n_samples": 10254
+      },
+      "CAPSD_AAV2S_Sinai_2021.csv": {
+        "spearman_rho": 0.21239986095562502,
+        "spearman_abs": 0.21239986095562502,
+        "spearman_pval": 0.0,
+        "auc_roc": 0.6191709336922464,
+        "mcc": 0.16506407072396861,
+        "n_samples": 41828
+      },
+      "I6TAH8_I68A0_Doud_2015.csv": {
+        "spearman_rho": 0.26107409477438487,
+        "spearman_abs": 0.26107409477438487,
+        "spearman_pval": 1.439645151957824e-139,
+        "auc_roc": 0.6370454966171484,
+        "mcc": 0.2037491631332292,
+        "n_samples": 8962
+      },
+      "PA_I34A1_Wu_2015.csv": {
+        "spearman_rho": 0.11301320243474136,
+        "spearman_abs": 0.11301320243474136,
+        "spearman_pval": 3.867200939559282e-05,
+        "auc_roc": 0.5612786960514233,
+        "mcc": 0.10303030303030303,
+        "n_samples": 1320
+      },
+      "POLG_DEN26_Suphatrakul_2023.csv": {
+        "spearman_rho": -0.036984513237850236,
+        "spearman_abs": 0.036984513237850236,
+        "spearman_pval": 2.167394107712566e-06,
+        "auc_roc": 0.48052030545022995,
+        "mcc": -0.010062812686889829,
+        "n_samples": 16397
+      },
+      "Q2N0S5_9HIV1_Haddox_2018.csv": {
+        "spearman_rho": -0.0212107317730853,
+        "spearman_abs": 0.0212107317730853,
+        "spearman_pval": 0.01899603292452878,
+        "auc_roc": 0.5063922217702849,
+        "mcc": 0.01809412247739994,
+        "n_samples": 12229
+      },
+      "R1AB_SARS2_Flynn_2022.csv": {
+        "spearman_rho": -0.02043592706863178,
+        "spearman_abs": 0.02043592706863178,
+        "spearman_pval": 0.13967707217933328,
+        "auc_roc": 0.5047061613774806,
+        "mcc": 0.01879809229977333,
+        "n_samples": 5225
+      },
+      "RDRP_I33A0_Li_2023.csv": {
+        "spearman_rho": 0.07815864299536232,
+        "spearman_abs": 0.07815864299536232,
+        "spearman_pval": 4.6745871613791384e-17,
+        "auc_roc": 0.5683779658825376,
+        "mcc": 0.09970741328482868,
+        "n_samples": 11503
+      },
+      "REV_HV1H2_Fernandes_2016.csv": {
+        "spearman_rho": 0.13417891214957456,
+        "spearman_abs": 0.13417891214957456,
+        "spearman_pval": 4.602628603089425e-08,
+        "auc_roc": 0.5688270394152747,
+        "mcc": 0.07832244780977836,
+        "n_samples": 1647
+      },
+      "TAT_HV1BR_Fernandes_2016.csv": {
+        "spearman_rho": 0.12312025360751909,
+        "spearman_abs": 0.12312025360751909,
+        "spearman_pval": 5.094446734179335e-05,
+        "auc_roc": 0.5691968015276286,
+        "mcc": 0.13499557833552855,
+        "n_samples": 1077
+      }
+    }
+  },
+  "sgtm-ret25-35m_ablated": {
+    "mean_abs_spearman": 0.10343732792016917,
+    "median_abs_spearman": 0.09496823207782182,
+    "per_dataset": {
+      "A0A192B1T2_9HIV1_Haddox_2018.csv": {
+        "spearman_rho": 0.1059262782996506,
+        "spearman_abs": 0.1059262782996506,
+        "spearman_pval": 1.7625865674637507e-31,
+        "auc_roc": 0.5565500336588176,
+        "mcc": 0.08721268589142221,
+        "n_samples": 12077
+      },
+      "A0A2Z5U3Z0_9INFA_Doud_2016.csv": {
+        "spearman_rho": 0.09150864206498506,
+        "spearman_abs": 0.09150864206498506,
+        "spearman_pval": 1.914031304209014e-20,
+        "auc_roc": 0.5454414143438483,
+        "mcc": 0.060792961707938756,
+        "n_samples": 10215
+      },
+      "A0A2Z5U3Z0_9INFA_Wu_2014.csv": {
+        "spearman_rho": 0.09490916924570236,
+        "spearman_abs": 0.09490916924570236,
+        "spearman_pval": 4.3385207923223905e-05,
+        "auc_roc": 0.5375929875821768,
+        "mcc": 0.05081081081081081,
+        "n_samples": 1850
+      },
+      "A4D664_9INFA_Soh_2019.csv": {
+        "spearman_rho": 0.15426019228611054,
+        "spearman_abs": 0.15426019228611054,
+        "spearman_pval": 7.041245956242821e-75,
+        "auc_roc": 0.582850470684784,
+        "mcc": 0.12362617175825247,
+        "n_samples": 13921
+      },
+      "C6KNH7_9INFA_Lee_2018.csv": {
+        "spearman_rho": 0.06613955276484444,
+        "spearman_abs": 0.06613955276484444,
+        "spearman_pval": 2.0285935086820012e-11,
+        "auc_roc": 0.5324760066421343,
+        "mcc": 0.06026916325336454,
+        "n_samples": 10254
+      },
+      "CAPSD_AAV2S_Sinai_2021.csv": {
+        "spearman_rho": 0.14763511959357337,
+        "spearman_abs": 0.14763511959357337,
+        "spearman_pval": 1.866927725810504e-202,
+        "auc_roc": 0.5866607767679887,
+        "mcc": 0.1285107518737912,
+        "n_samples": 41828
+      },
+      "I6TAH8_I68A0_Doud_2015.csv": {
+        "spearman_rho": 0.22798115096740157,
+        "spearman_abs": 0.22798115096740157,
+        "spearman_pval": 5.233878247760853e-106,
+        "auc_roc": 0.6164133908444596,
+        "mcc": 0.1702744923008257,
+        "n_samples": 8962
+      },
+      "PA_I34A1_Wu_2015.csv": {
+        "spearman_rho": 0.05890923950254793,
+        "spearman_abs": 0.05890923950254793,
+        "spearman_pval": 0.032345878075062125,
+        "auc_roc": 0.5345661157024794,
+        "mcc": 0.06666666666666667,
+        "n_samples": 1320
+      },
+      "POLG_DEN26_Suphatrakul_2023.csv": {
+        "spearman_rho": -0.003438757294748261,
+        "spearman_abs": 0.003438757294748261,
+        "spearman_pval": 0.6597174830552683,
+        "auc_roc": 0.5031880490724432,
+        "mcc": 0.00384216998359989,
+        "n_samples": 16397
+      },
+      "Q2N0S5_9HIV1_Haddox_2018.csv": {
+        "spearman_rho": 0.09502729490994127,
+        "spearman_abs": 0.09502729490994127,
+        "spearman_pval": 6.19468594358087e-26,
+        "auc_roc": 0.5627063461928374,
+        "mcc": 0.07967841655590235,
+        "n_samples": 12229
+      },
+      "R1AB_SARS2_Flynn_2022.csv": {
+        "spearman_rho": -0.022958796664928803,
+        "spearman_abs": 0.022958796664928803,
+        "spearman_pval": 0.09703944464501948,
+        "auc_roc": 0.4822717624148636,
+        "mcc": -0.021492677280055716,
+        "n_samples": 5225
+      },
+      "RDRP_I33A0_Li_2023.csv": {
+        "spearman_rho": 0.07388470550665284,
+        "spearman_abs": 0.07388470550665284,
+        "spearman_pval": 2.1173740414414445e-15,
+        "auc_roc": 0.5594483389210606,
+        "mcc": 0.0804826778737038,
+        "n_samples": 11503
+      },
+      "REV_HV1H2_Fernandes_2016.csv": {
+        "spearman_rho": 0.17920114615137192,
+        "spearman_abs": 0.17920114615137192,
+        "spearman_pval": 2.363732061540876e-13,
+        "auc_roc": 0.5747321041438689,
+        "mcc": 0.08803772875291294,
+        "n_samples": 1647
+      },
+      "TAT_HV1BR_Fernandes_2016.csv": {
+        "spearman_rho": 0.12634254562990935,
+        "spearman_abs": 0.12634254562990935,
+        "spearman_pval": 3.208678914007075e-05,
+        "auc_roc": 0.5624855790269323,
+        "mcc": 0.0472356740064476,
+        "n_samples": 1077
+      }
+    }
+  }
+}

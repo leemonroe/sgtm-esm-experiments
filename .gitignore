@@ -25,6 +25,25 @@
 !sgtm/methods_section.md
 !sgtm/results_phase2_8m.md
 !sgtm/plot_results.py
+!sgtm/plot_family_results.py
+
+# Results (family Coronaviridae task)
+!results/
+!results/sgtm_p2/
+!results/sgtm_p2/family_coronaviridae/
+!results/sgtm_p2/family_coronaviridae/*.json
+!results/sgtm_p2/family_coronaviridae/recovery-35m/
+!results/sgtm_p2/family_coronaviridae/recovery-35m/*.json
+!results/sgtm_p2/family_coronaviridae/recovery-8m/
+!results/sgtm_p2/family_coronaviridae/recovery-8m/*.json
+
+# Figures
+!figures/
+!figures/family/
+!figures/family/*.png
+
+# Documentation
+!RUNPOD_GUIDE.md
 
 # Scripts
 !scripts/

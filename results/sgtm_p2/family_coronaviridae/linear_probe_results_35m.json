@@ -1,0 +1,51 @@
+{
+  "task_descriptions": {
+    "forget_vs_all": "Forget vs All (18 forget, 36 other)",
+    "forget_vs_adjacent": "Forget vs Adjacent (18 forget, 36 adjacent)",
+    "forget_vs_retain": "Forget vs Retain (18 forget, 36 retain)"
+  },
+  "results": {
+    "holdout-35m": {
+      "forget_vs_all": {
+        "mean": 0.65,
+        "std": 0.1333333333333333
+      },
+      "forget_vs_adjacent": {
+        "mean": 0.631547619047619,
+        "std": 0.19751144517484726
+      },
+      "forget_vs_retain": {
+        "mean": 0.8107142857142857,
+        "std": 0.1353378237249744
+      }
+    },
+    "sgtm-ret25-35m": {
+      "forget_vs_all": {
+        "mean": 0.669047619047619,
+        "std": 0.14093951035189276
+      },
+      "forget_vs_adjacent": {
+        "mean": 0.6898809523809524,
+        "std": 0.17976190476190476
+      },
+      "forget_vs_retain": {
+        "mean": 0.8214285714285715,
+        "std": 0.12163847404233144
+      }
+    },
+    "sgtm-ret25-35m_ablated": {
+      "forget_vs_all": {
+        "mean": 0.6702380952380953,
+        "std": 0.12242819173507084
+      },
+      "forget_vs_adjacent": {
+        "mean": 0.7178571428571429,
+        "std": 0.15867757065373617
+      },
+      "forget_vs_retain": {
+        "mean": 0.8339285714285716,
+        "std": 0.08057510123341771
+      }
+    }
+  }
+}

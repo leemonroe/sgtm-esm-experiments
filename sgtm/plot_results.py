@@ -69,11 +69,35 @@ def setup_style():
 # DATA — all results hardcoded for reproducibility & offline plotting
 # ══════════════════════════════════════════════════════════════════════
 
-# Phase 1: Coarse task, 8M (virus vs non-virus, all data categories)
+# Pretrained ESM-2 baselines (Meta models trained on UniRef50)
+PRETRAINED_BASELINE = {
+    "8M":  {"forget": 12.82, "adjacent": 12.94, "retain": 10.95},
+    "35M": {"forget": 12.74, "adjacent": 12.29, "retain": 8.10},
+}
+
+# Phase 2: Family task (Coronaviridae) — the 2×2 experiment
+# Data Filtering = holdout (trained without forget data)
+# SGTM = gradient masking + ablation
+FAMILY_8M = {
+    "Data Filtering":      {"forget": 13.57, "adjacent": 13.23, "retain": 9.47},
+    "SGTM":                {"forget": 13.45, "adjacent": 13.22, "retain": 9.41},
+    "SGTM (ablated)":      {"forget": 17.85, "adjacent": 17.96, "retain": 13.38},
+}
+FAMILY_35M = {
+    "Data Filtering":      {"forget": 13.47, "adjacent": 12.01, "retain": 7.84},
+    "SGTM":                {"forget": 13.60, "adjacent": 12.88, "retain": 8.47},
+    "SGTM (ablated)":      {"forget": 22.07, "adjacent": 26.42, "retain": 19.38},
+}
+FAMILY_ABLATION_RATIOS = {
+    "8M":  {"forget": 1.33, "adjacent": 1.36, "retain": 1.42},
+    "35M": {"forget": 1.62, "adjacent": 2.05, "retain": 2.29},
+}
+
+# Phase 1: Coarse task, 8M (virus vs non-virus)
 COARSE_8M = {
     "absolute_ppl": {
         "Baseline 8M":      {"forget": 1.51, "adjacent": 5.35, "retain": 11.62},
-        "Holdout 8M":       {"forget": 14.47, "adjacent": 6.37, "retain": 10.99},
+        "Data Filtering 8M": {"forget": 14.47, "adjacent": 6.37, "retain": 10.99},
         "SGTM 8M":          {"forget": 12.91, "adjacent": 10.28, "retain": 13.98},
         "SGTM 8M\n(ablated)": {"forget": 121164, "adjacent": 236280, "retain": 162414},
     },
@@ -82,7 +106,7 @@ COARSE_8M = {
 # Phase 1: 35M (attn-only and attn+MLP conditions)
 PHASE1_35M = {
     "pre_ablation": {
-        "Holdout":       {"forget": 14.17, "adjacent": 5.67, "retain": 10.23},
+        "Data Filtering": {"forget": 14.17, "adjacent": 5.67, "retain": 10.23},
         "Attn-only":     {"forget": 14.11, "adjacent": 10.78, "retain": 13.78},
         "Attn+MLP":      {"forget": 13.56, "adjacent": 12.31, "retain": 13.92},
     },
@@ -92,20 +116,7 @@ PHASE1_35M = {
     },
 }
 
-# Phase 2: Family task (Coronaviridae), 35M
-FAMILY_35M = {
-    "absolute_ppl": {
-        "Holdout":            {"forget": 13.47, "adjacent": 12.01, "retain": 7.84},
-        "SGTM ret25":        {"forget": 13.60, "adjacent": 12.88, "retain": 8.47},
-        "SGTM ret25\n(ablated)": {"forget": 22.07, "adjacent": 26.42, "retain": 19.38},
-    },
-    "ablation_ratios": {
-        "forget": 1.62, "adjacent": 2.05, "retain": 2.29,
-    },
-}
-
-# Phase 2: Recovery fine-tuning (35M holdout → forget data)
-# Reconstructed from eval logs
+# Recovery fine-tuning (35M holdout → forget data)
 RECOVERY_35M = {
     "baseline_ppl": {"forget": 13.75, "retain": 8.36, "adjacent": 12.26},
     "history": [
@@ -124,7 +135,7 @@ RECOVERY_35M = {
 LINEAR_PROBES_35M = {
     "task1_human_vs_nonhuman": {
         "majority_baseline": 0.78,
-        "Holdout":              {"mean": 0.980, "std": 0.005},
+        "Data Filtering":       {"mean": 0.980, "std": 0.005},
         "Attn-only":            {"mean": 0.946, "std": 0.019},
         "Attn-only (ablated)":  {"mean": 0.882, "std": 0.017},
         "Attn+MLP":             {"mean": 0.855, "std": 0.103},
@@ -132,7 +143,7 @@ LINEAR_PROBES_35M = {
     },
     "task2_viral_vs_nonviral": {
         "majority_baseline": 0.76,
-        "Holdout":              {"mean": 0.900, "std": 0.054},
+        "Data Filtering":       {"mean": 0.900, "std": 0.054},
         "Attn-only":            {"mean": 0.800, "std": 0.129},
         "Attn-only (ablated)":  {"mean": 0.813, "std": 0.058},
         "Attn+MLP":             {"mean": 0.837, "std": 0.048},
@@ -164,9 +175,14 @@ def plot_selectivity_test(output_path):
         points.append((fr, rr, f"P1 35M\n{cond}", "^", "#988ED5"))
 
     # Phase 2 family 35M
-    fr = FAMILY_35M["ablation_ratios"]["forget"]
-    rr = FAMILY_35M["ablation_ratios"]["retain"]
+    fr = FAMILY_ABLATION_RATIOS["35M"]["forget"]
+    rr = FAMILY_ABLATION_RATIOS["35M"]["retain"]
     points.append((fr, rr, "P2 35M\nFamily", "D", "#E24A33"))
+
+    # Phase 2 family 8M
+    fr_8m_fam = FAMILY_ABLATION_RATIOS["8M"]["forget"]
+    rr_8m_fam = FAMILY_ABLATION_RATIOS["8M"]["retain"]
+    points.append((fr_8m_fam, rr_8m_fam, "P2 8M\nFamily", "s", "#E24A33"))
 
     # Phase 1 coarse 8M
     pre_8m = COARSE_8M["absolute_ppl"]["SGTM 8M"]
@@ -228,39 +244,64 @@ def plot_selectivity_test(output_path):
 
 
 # ══════════════════════════════════════════════════════════════════════
-# PLOT 2: PPL comparison — grouped bar chart, all conditions
+# PLOT 2: Family task 2×2 — Data Filtering vs SGTM × 8M vs 35M
 # ══════════════════════════════════════════════════════════════════════
 
-def plot_ppl_dashboard(output_path):
-    """Two-panel figure: Phase 1 (coarse) vs Phase 2 (family) PPL bars.
+def plot_family_ppl_2x2(output_path):
+    """Side-by-side comparison: Data Filtering vs SGTM (ablated) at each scale.
 
-    Left: 8M coarse (baseline, holdout, SGTM)
-    Right: 35M family (holdout, SGTM, SGTM ablated)
+    Two panels (8M, 35M). Each has grouped bars showing forget and retain PPL
+    for both methods, so the viewer can directly compare the tradeoff:
+    - Does the method degrade forget? (higher = better)
+    - Does it preserve retain? (lower = better)
     """
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 6), sharey=True)
 
-    # ── Left panel: 8M coarse ──
-    conditions_8m = ["Baseline", "Holdout", "SGTM"]
-    data_8m = {
-        "Baseline": COARSE_8M["absolute_ppl"]["Baseline 8M"],
-        "Holdout":  COARSE_8M["absolute_ppl"]["Holdout 8M"],
-        "SGTM":     COARSE_8M["absolute_ppl"]["SGTM 8M"],
-    }
-    _grouped_bars(ax1, conditions_8m, data_8m, ["forget", "adjacent", "retain"],
-                  title="Phase 1: Coarse Task (8M)\nAll viral vs non-viral")
+    def _draw_comparison(ax, title, df_data, sgtm_data):
+        """Draw grouped bars comparing two methods on forget/retain."""
+        splits = ["forget", "retain"]
+        split_labels = ["Forget\n(Coronaviridae)", "Retain\n(non-viral)"]
+        x = np.arange(len(splits))
+        width = 0.3
 
-    # ── Right panel: 35M family ──
-    conditions_35m = ["Holdout", "SGTM", "SGTM\n(ablated)"]
-    data_35m = {
-        "Holdout":         FAMILY_35M["absolute_ppl"]["Holdout"],
-        "SGTM":            FAMILY_35M["absolute_ppl"]["SGTM ret25"],
-        "SGTM\n(ablated)": FAMILY_35M["absolute_ppl"]["SGTM ret25\n(ablated)"],
-    }
-    _grouped_bars(ax2, conditions_35m, data_35m, ["forget", "adjacent", "retain"],
-                  title="Phase 2: Family Task (35M)\nForget Coronaviridae")
+        # Data Filtering bars
+        df_vals = [df_data[s] for s in splits]
+        bars1 = ax.bar(x - width/2, df_vals, width, label="Data Filtering",
+                        color=PAL["holdout"], edgecolor="white", linewidth=1)
 
-    fig.suptitle("Perplexity Across Experimental Conditions",
-                 fontsize=18, fontweight="bold", y=1.02)
+        # SGTM (ablated) bars
+        sgtm_vals = [sgtm_data[s] for s in splits]
+        bars2 = ax.bar(x + width/2, sgtm_vals, width, label="SGTM (ablated)",
+                        color=PAL["sgtm"], edgecolor="white", linewidth=1)
+
+        # Value labels
+        for bars in [bars1, bars2]:
+            for bar in bars:
+                v = bar.get_height()
+                ax.text(bar.get_x() + bar.get_width() / 2, v + 0.3,
+                        f"{v:.1f}", ha="center", va="bottom", fontsize=11,
+                        fontweight="bold", color="#333333")
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(split_labels, fontsize=11)
+        ax.set_ylabel("Sequence PPL", fontsize=12)
+        ax.set_title(title, fontsize=14, fontweight="bold")
+        ax.legend(loc="upper left", fontsize=11)
+
+    _draw_comparison(ax1, "ESM-2 8M",
+                     FAMILY_8M["Data Filtering"], FAMILY_8M["SGTM (ablated)"])
+    _draw_comparison(ax2, "ESM-2 35M",
+                     FAMILY_35M["Data Filtering"], FAMILY_35M["SGTM (ablated)"])
+
+    # Set shared y-axis limit
+    all_vals = [FAMILY_8M["SGTM (ablated)"]["retain"],
+                FAMILY_35M["SGTM (ablated)"]["adjacent"],
+                FAMILY_35M["SGTM (ablated)"]["retain"]]
+    ax1.set_ylim(0, max(all_vals) * 1.2)
+
+    fig.suptitle("Coronaviridae Forget Task: Data Filtering vs SGTM\n"
+                 "Goal: high forget PPL (capability removed) + low retain PPL (no collateral damage)",
+                 fontsize=14, fontweight="bold", y=1.04)
     plt.tight_layout()
     plt.savefig(output_path)
     plt.close()
@@ -299,9 +340,11 @@ def _grouped_bars(ax, conditions, data, splits, title=""):
 # ══════════════════════════════════════════════════════════════════════
 
 def plot_recovery(output_path):
-    """Dual-axis recovery curve showing forget PPL dropping while retain rises.
+    """Recovery curve showing forget PPL dropping during fine-tuning.
 
-    The visual story: data filtering is trivially reversible.
+    Shows data filtering recovery with pretrained ESM-2 baseline as
+    the target (dotted line). SGTM ablated recovery will be added
+    when data is available.
     """
     data = RECOVERY_35M
     history = data["history"]
@@ -310,56 +353,57 @@ def plot_recovery(output_path):
     forget_ppl = [h["forget_ppl"] for h in history]
     retain_ppl = [h["retain_ppl"] for h in history]
 
-    fig, ax = plt.subplots(figsize=(9, 5.5))
+    fig, ax = plt.subplots(figsize=(10, 6))
 
     # Forget line (dropping = recovering capability)
     ax.plot(steps, forget_ppl, "-o", color=PAL["forget"], linewidth=2.5,
-            markersize=7, label="Forget (Coronaviridae)", zorder=5)
-    # Retain line (rising = catastrophic forgetting)
+            markersize=7, label="Data Filtering — Forget PPL", zorder=5)
+    # Retain line (rising = catastrophic forgetting of general capability)
     ax.plot(steps, retain_ppl, "-s", color=PAL["retain"], linewidth=2.5,
-            markersize=7, label="Retain (non-viral)", zorder=5)
+            markersize=7, label="Data Filtering — Retain PPL", zorder=5)
 
-    # Baseline references
-    ax.axhline(y=data["baseline_ppl"]["forget"], color=PAL["forget"],
-               linestyle=":", alpha=0.4, linewidth=1.5)
-    ax.axhline(y=data["baseline_ppl"]["retain"], color=PAL["retain"],
-               linestyle=":", alpha=0.4, linewidth=1.5)
+    # Pretrained ESM-2 baseline (the capability ceiling)
+    pretrained_forget = PRETRAINED_BASELINE["35M"]["forget"]
+    pretrained_retain = PRETRAINED_BASELINE["35M"]["retain"]
+    ax.axhline(y=pretrained_forget, color=PAL["forget"],
+               linestyle="--", alpha=0.7, linewidth=2, zorder=3)
+    ax.axhline(y=pretrained_retain, color=PAL["retain"],
+               linestyle="--", alpha=0.7, linewidth=2, zorder=3)
 
-    # Annotate the crossover
-    # Find approximate crossover
+    # Label the pretrained baselines
+    ax.text(steps[-1] + 50, pretrained_forget + 0.3,
+            f"Pretrained ESM-2 35M\nforget PPL = {pretrained_forget:.1f}",
+            fontsize=9, color=PAL["forget"], va="bottom", fontweight="bold")
+    ax.text(steps[-1] + 50, pretrained_retain - 0.3,
+            f"Pretrained ESM-2 35M\nretain PPL = {pretrained_retain:.1f}",
+            fontsize=9, color=PAL["retain"], va="top", fontweight="bold")
+
+    # TODO: Add SGTM ablated recovery curves here when data is available
+    # ax.plot(sgtm_steps, sgtm_forget_ppl, "-^", color=PAL["sgtm"], ...)
+
+    # Annotate the crossover — place label above the lines
     for i in range(len(steps) - 1):
         if retain_ppl[i] < forget_ppl[i] and retain_ppl[i + 1] >= forget_ppl[i + 1]:
             cross_step = (steps[i] + steps[i + 1]) / 2
-            cross_ppl = (retain_ppl[i] + forget_ppl[i]) / 2
-            ax.annotate("Crossover\n~100 steps",
+            cross_ppl = max(retain_ppl[i + 1], forget_ppl[i + 1]) + 1
+            ax.annotate("Crossover ~100 steps",
                         xy=(cross_step, cross_ppl),
-                        xytext=(cross_step + 400, cross_ppl + 5),
+                        xytext=(cross_step + 500, 32),
                         fontsize=11, fontweight="bold", color="#444444",
                         arrowprops=dict(arrowstyle="->", color="#444444",
-                                        lw=1.5, connectionstyle="arc3,rad=0.2"),
+                                        lw=1.5, connectionstyle="arc3,rad=-0.2"),
                         bbox=dict(boxstyle="round,pad=0.4", facecolor="#FFFFCC",
                                   edgecolor="#CCCC00", alpha=0.9))
             break
 
-    # Annotate final values
-    ax.annotate(f"PPL {forget_ppl[-1]:.1f}\n(-76%)",
-                xy=(steps[-1], forget_ppl[-1]),
-                xytext=(steps[-1] - 500, forget_ppl[-1] - 3),
-                fontsize=10, color=PAL["forget"], fontweight="bold",
-                arrowprops=dict(arrowstyle="->", color=PAL["forget"], lw=1.2))
-    ax.annotate(f"PPL {retain_ppl[-1]:.1f}\n(+185%)",
-                xy=(steps[-1], retain_ppl[-1]),
-                xytext=(steps[-1] - 500, retain_ppl[-1] + 4),
-                fontsize=10, color=PAL["retain"], fontweight="bold",
-                arrowprops=dict(arrowstyle="->", color=PAL["retain"], lw=1.2))
-
     ax.set_xlabel("Recovery Fine-Tuning Steps")
     ax.set_ylabel("Perplexity")
-    ax.set_title("Data Filtering Is Trivially Reversible\n"
-                 "Holdout model recovers Coronaviridae in ~100 steps",
-                 fontsize=15, fontweight="bold")
+    ax.set_title("Recovery Fine-Tuning: Data Filtering → Forget Data\n"
+                 "35M data-filtered model recovers Coronaviridae capability in ~100 steps",
+                 fontsize=14, fontweight="bold")
     ax.legend(loc="center right", framealpha=0.9)
     ax.set_ylim(0, 38)
+    ax.set_xlim(-50, steps[-1] + 300)
 
     # Subtle shading for "danger zone"
     ax.axvspan(0, 100, alpha=0.05, color=PAL["forget"], zorder=0)
@@ -406,9 +450,14 @@ def plot_selectivity_index(output_path):
     entries.append(("P1 8M Coarse", fr_8m / rr_8m, catastrophic_8m))
 
     # Phase 2 family 35M
-    fr = FAMILY_35M["ablation_ratios"]["forget"]
-    rr = FAMILY_35M["ablation_ratios"]["retain"]
+    fr = FAMILY_ABLATION_RATIOS["35M"]["forget"]
+    rr = FAMILY_ABLATION_RATIOS["35M"]["retain"]
     entries.append(("P2 35M Family", fr / rr, False))
+
+    # Phase 2 family 8M
+    fr_8m = FAMILY_ABLATION_RATIOS["8M"]["forget"]
+    rr_8m = FAMILY_ABLATION_RATIOS["8M"]["retain"]
+    entries.append(("P2 8M Family", fr_8m / rr_8m, False))
 
     # Sort by index
     entries.sort(key=lambda e: e[1], reverse=True)
@@ -489,11 +538,11 @@ def plot_summary_figure(output_path):
 
     # ── Panel C: Family task PPL bars ──
     ax_c = fig.add_subplot(gs[1, 0])
-    conditions_35m = ["Holdout", "SGTM", "SGTM\n(ablated)"]
+    conditions_35m = ["Data\nFiltering", "SGTM", "SGTM\n(ablated)"]
     data_35m = {
-        "Holdout":         FAMILY_35M["absolute_ppl"]["Holdout"],
-        "SGTM":            FAMILY_35M["absolute_ppl"]["SGTM ret25"],
-        "SGTM\n(ablated)": FAMILY_35M["absolute_ppl"]["SGTM ret25\n(ablated)"],
+        "Data\nFiltering":  FAMILY_35M["Data Filtering"],
+        "SGTM":             FAMILY_35M["SGTM"],
+        "SGTM\n(ablated)":  FAMILY_35M["SGTM (ablated)"],
     }
     _grouped_bars(ax_c, conditions_35m, data_35m, ["forget", "adjacent", "retain"],
                   title="Family Task PPL (35M)")
@@ -577,9 +626,13 @@ def _draw_selectivity_panel(ax):
     entries.append(("8M Coarse", si, True))
 
     # Phase 2 family
-    fr = FAMILY_35M["ablation_ratios"]["forget"]
-    rr = FAMILY_35M["ablation_ratios"]["retain"]
+    fr = FAMILY_ABLATION_RATIOS["35M"]["forget"]
+    rr = FAMILY_ABLATION_RATIOS["35M"]["retain"]
     entries.append(("35M Family", fr / rr, False))
+
+    fr_8m_f = FAMILY_ABLATION_RATIOS["8M"]["forget"]
+    rr_8m_f = FAMILY_ABLATION_RATIOS["8M"]["retain"]
+    entries.append(("8M Family", fr_8m_f / rr_8m_f, False))
 
     entries.sort(key=lambda e: e[1], reverse=True)
     conditions = [e[0] for e in entries]
@@ -649,7 +702,7 @@ def plot_phase1_ablation(output_path):
     """
     fig, ax = plt.subplots(figsize=(10, 6))
 
-    conditions = ["Holdout\n(pre)", "Attn-only\n(pre)", "Attn-only\n(post)",
+    conditions = ["Data Filtering\n(pre)", "Attn-only\n(pre)", "Attn-only\n(post)",
                   "Attn+MLP\n(pre)", "Attn+MLP\n(post)"]
     forget_vals = [14.17, 14.11, 5.6e23, 13.56, 3.3e31]
     retain_vals = [10.23, 13.78, 5.3e22, 13.92, 7.7e31]
@@ -707,7 +760,7 @@ def main():
     # Individual plots
     plot_selectivity_test(os.path.join(args.output_dir, f"selectivity_scatter.{ext}"))
     plot_selectivity_index(os.path.join(args.output_dir, f"selectivity_index.{ext}"))
-    plot_ppl_dashboard(os.path.join(args.output_dir, f"ppl_dashboard.{ext}"))
+    plot_family_ppl_2x2(os.path.join(args.output_dir, f"family_ppl_2x2.{ext}"))
     plot_recovery(os.path.join(args.output_dir, f"recovery_curve.{ext}"))
     plot_phase1_ablation(os.path.join(args.output_dir, f"phase1_ablation.{ext}"))
 
